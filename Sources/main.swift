@@ -40,16 +40,26 @@ var children: AnyObject?
 let result = AXUIElementCopyAttributeValue(dockElement, kAXChildrenAttribute as CFString, &children)
 
 if result == .success, let elements = children as? [AXUIElement] {
-    // Find the list element that contains the app icons.
-    if let appList = elements.first(where: {
-        var role: AnyObject?
-        AXUIElementCopyAttributeValue($0, kAXRoleAttribute as CFString, &role)
-        return (role as? String) == kAXListRole as String
-    }) {
-        // 4. Get all the icons from within that list.
-        var appIcons: AnyObject?
-        if AXUIElementCopyAttributeValue(appList, kAXChildrenAttribute as CFString, &appIcons) == .success,
-           let icons = appIcons as? [AXUIElement] {
+    // The app list is typically the first child
+    guard let appList = elements.first else {
+        print("{\"error\": \"No app list found in Dock\"}")
+        exit(1)
+    }
+    
+    // Verify it's actually a list (optional, for safety)
+    var role: AnyObject?
+    let roleResult = AXUIElementCopyAttributeValue(appList, kAXRoleAttribute as CFString, &role)
+    if roleResult == .success {
+        if (role as? String) != kAXListRole as String {
+            print("{\"error\": \"Dock structure unexpected\"}")
+            exit(1)
+        }
+    }
+    
+    // 4. Get all the icons from within that list.
+    var appIcons: AnyObject?
+    if AXUIElementCopyAttributeValue(appList, kAXChildrenAttribute as CFString, &appIcons) == .success,
+       let icons = appIcons as? [AXUIElement] {
             
             // 5. Iterate over each icon to find its title and badge.
             for icon in icons {
@@ -76,7 +86,6 @@ if result == .success, let elements = children as? [AXUIElement] {
             }
         }
     }
-}
 
 // 6. Encode the final dictionary to JSON and print it.
 do {
