@@ -27,9 +27,9 @@ var badgeData: [String: String] = [:]
 
 // 1. Find the Dock's process identifier (PID).
 guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else {
-    // If Dock isn't running, print an empty JSON object and exit.
-    print("{}")
-    exit(0)
+    // If Dock isn't running, print an error JSON object and exit.
+    print("{\"error\": \"Dock process not found\"}")
+    exit(1)
 }
 
 // 2. Create an accessibility element for the Dock application.
@@ -88,4 +88,8 @@ do {
     }
 } catch {
     print("{\"error\": \"Failed to encode JSON\"}")
+    exit(1)
 }
+
+// Successful completion
+exit(0)
