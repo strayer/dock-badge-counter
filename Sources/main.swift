@@ -81,13 +81,10 @@ if result == .success, let elements = children as? [AXUIElement] {
 // 6. Encode the final dictionary to JSON and print it.
 do {
     let jsonData = try JSONEncoder().encode(badgeData)
-    if let jsonString = String(data: jsonData, encoding: .utf8) {
-        print(jsonString)
-    } else {
-        print("{}")
-    }
+    FileHandle.standardOutput.write(jsonData)
+    print() // Add newline
 } catch {
-    print("{\"error\": \"Failed to encode JSON\"}")
+    print("{\"error\": \"Failed to encode JSON: \(error.localizedDescription)\"}")
     exit(1)
 }
 
