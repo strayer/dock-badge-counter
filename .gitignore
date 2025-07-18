@@ -1,0 +1,10 @@
+# .gitignore
+
+# Swift Package Manager
+.build/
+Packages/
+*.xcodeproj
+*.xcworkspace
+
+# macOS
+.DS_Store
