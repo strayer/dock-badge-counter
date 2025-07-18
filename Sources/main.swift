@@ -3,6 +3,11 @@
 import Foundation
 import AppKit // Using AppKit gives us access to NSRunningApplication and Accessibility
 
+// Constants
+private let kDockBundleID = "com.apple.dock"
+private let kBadgeAttribute = "AXStatusLabel"
+private let kEmptyJSON = "{}"
+
 // --- Command Line Arguments ---
 var includeEmpty = false
 
@@ -26,7 +31,7 @@ if !trusted {
 var badgeData: [String: String] = [:]
 
 // 1. Find the Dock's process identifier (PID).
-guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else {
+guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: kDockBundleID).first else {
     // If Dock isn't running, print an error JSON object and exit.
     print("{\"error\": \"Dock process not found\"}")
     exit(1)
@@ -75,7 +80,7 @@ if result == .success, let elements = children as? [AXUIElement] {
                     // Get the badge for this app
                     // The attribute is officially called "AXStatusLabel".
                     var badge: AnyObject?
-                    let badgeResult = AXUIElementCopyAttributeValue(icon, "AXStatusLabel" as CFString, &badge)
+                    let badgeResult = AXUIElementCopyAttributeValue(icon, kBadgeAttribute as CFString, &badge)
                     
                     if badgeResult == .success, let badgeText = badge as? String, !badgeText.isEmpty {
                         // We found a badge!
