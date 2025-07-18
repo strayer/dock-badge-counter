@@ -13,6 +13,14 @@ for argument in CommandLine.arguments {
     }
 }
 
+// Check accessibility permissions
+let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+let trusted = AXIsProcessTrustedWithOptions(options)
+if !trusted {
+    print("{\"error\": \"Accessibility permissions not granted. Grant access in System Settings > Privacy & Security > Accessibility\"}")
+    exit(1)
+}
+
 // --- Main Logic ---
 
 var badgeData: [String: String] = [:]
