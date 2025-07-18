@@ -63,15 +63,18 @@ if result == .success, let elements = children as? [AXUIElement] {
             
             // 5. Iterate over each icon to find its title and badge.
             for icon in icons {
-                var title: AnyObject?
-                var badge: AnyObject?
-                
-                // Get the app's title (e.g., "WhatsApp")
-                AXUIElementCopyAttributeValue(icon, kAXTitleAttribute as CFString, &title)
-                
-                if let appName = title as? String, !appName.isEmpty {
+                autoreleasepool {
+                    var title: AnyObject?
+                    let titleResult = AXUIElementCopyAttributeValue(icon, kAXTitleAttribute as CFString, &title)
+                    
+                    guard titleResult == .success, let appName = title as? String, !appName.isEmpty else {
+                        // Skip this icon if we can't read its title
+                        return // Continue to next icon
+                    }
+                    
                     // Get the badge for this app
                     // The attribute is officially called "AXStatusLabel".
+                    var badge: AnyObject?
                     let badgeResult = AXUIElementCopyAttributeValue(icon, "AXStatusLabel" as CFString, &badge)
                     
                     if badgeResult == .success, let badgeText = badge as? String, !badgeText.isEmpty {
