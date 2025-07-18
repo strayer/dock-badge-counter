@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(swift build:*)",
+      "Bash(.build/debug/dock-badge-counter:*)",
+      "Bash(.build/release/dock-badge-counter:*)"
+    ],
+    "deny": []
+  }
+}
+
