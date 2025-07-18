@@ -9,6 +9,19 @@ private let kBadgeAttribute = "AXStatusLabel"
 private let kEmptyJSON = "{}"
 
 // --- Command Line Arguments ---
+if CommandLine.arguments.contains("--help") {
+    print("""
+    dock-badge-counter - Read notification badges from macOS Dock
+    
+    Usage: dock-badge-counter [--include-empty]
+    
+    Options:
+      --include-empty    Include apps without badges in output
+      --help            Show this help message
+    """)
+    exit(0)
+}
+
 var includeEmpty = false
 
 // Parse command line arguments
