@@ -1,0 +1,52 @@
+name: Update Homebrew Formula
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-formula:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update formula
+        run: |
+          # Get the tag name (remove 'v' prefix if present)
+          TAG_NAME="${{ github.event.release.tag_name }}"
+          VERSION="${TAG_NAME#v}"
+          
+          # Calculate SHA256 of the release tarball
+          TARBALL_URL="https://github.com/${{ github.repository }}/archive/${TAG_NAME}.tar.gz"
+          SHA256=$(curl -sL "$TARBALL_URL" | shasum -a 256 | cut -d' ' -f1)
+          
+          echo "Updating formula for version: $VERSION"
+          echo "Tarball URL: $TARBALL_URL"
+          echo "Calculated SHA256: $SHA256"
+          
+          # Update the formula file
+          # Replace both the URL and SHA256 using more robust patterns
+          sed -i '' "s|url \".*\"|url \"$TARBALL_URL\"|" Formula/dock-badge-counter.rb
+          sed -i '' "s/sha256 \".*\"/sha256 \"$SHA256\"/" Formula/dock-badge-counter.rb
+          
+          # Verify the changes
+          echo "Updated formula contents:"
+          cat Formula/dock-badge-counter.rb
+
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add Formula/dock-badge-counter.rb
+          
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          
+          git commit -m "Update formula for ${{ github.event.release.tag_name }}"
+          git push

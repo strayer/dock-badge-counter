@@ -48,6 +48,25 @@ The entire application is contained in `Sources/main.swift` with the following s
 - **No External Dependencies**: Uses only system frameworks (AppKit, Foundation)
 - **Build Artifacts**: Located in `.build/arm64-apple-macosx/[debug|release]/`
 
+## Homebrew Tap
+
+This repository also functions as a Homebrew tap. Key files:
+
+- **Formula/dock-badge-counter.rb**: Homebrew formula for installation
+- **.github/workflows/update-formula.yml**: Automated formula updates on releases
+
+### Release Process
+
+1. Create a GitHub release with semantic version tag (e.g., `v1.0.0`)
+2. GitHub Actions automatically updates the formula with correct SHA256
+3. Users can install with: `brew install strayer/dock-badge-counter/dock-badge-counter`
+
+### Formula Maintenance
+
+- The formula builds using `swift build --configuration release --disable-sandbox`
+- Requires Xcode 15.0+ and macOS
+- Updates are automated but can be done manually if needed
+
 ## Common Tasks
 
 When making changes:
@@ -55,3 +74,4 @@ When making changes:
 2. All magic strings are defined as constants at the top of the file
 3. Errors are output to stderr with descriptive messages
 4. The tool should maintain its single-file simplicity unless there's a compelling reason to split it
+5. When creating releases, use semantic versioning and let GitHub Actions handle formula updates
