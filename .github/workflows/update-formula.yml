@@ -12,7 +12,7 @@ on:
 
 jobs:
   update-formula:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -42,8 +42,8 @@ jobs:
           
           # Update the formula file
           # Replace both the URL and SHA256 using more robust patterns
-          sed -i '' "s|url \".*\"|url \"$TARBALL_URL\"|" Formula/dock-badge-counter.rb
-          sed -i '' "s/sha256 \".*\"/sha256 \"$SHA256\"/" Formula/dock-badge-counter.rb
+          sed -i "s|url \".*\"|url \"$TARBALL_URL\"|" Formula/dock-badge-counter.rb
+          sed -i "s/sha256 \".*\"/sha256 \"$SHA256\"/" Formula/dock-badge-counter.rb
           
           # Verify the changes
           echo "Updated formula contents:"
