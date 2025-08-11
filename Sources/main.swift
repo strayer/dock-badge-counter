@@ -139,6 +139,17 @@ struct DockBadgeCounter {
       return nil
     }
 
+    // Filter out iCloud/Handoff items by checking AXSubrole
+    var subrole: AnyObject?
+    let subroleResult = AXUIElementCopyAttributeValue(icon, kAXSubroleAttribute as CFString, &subrole)
+    
+    if subroleResult == .success, let subroleString = subrole as? String {
+      // Skip Handoff items from other devices
+      if subroleString == "AXHandoffDockItem" {
+        return nil
+      }
+    }
+
     // Get badge
     var badge: AnyObject?
     let badgeResult = AXUIElementCopyAttributeValue(icon, kBadgeAttribute as CFString, &badge)
