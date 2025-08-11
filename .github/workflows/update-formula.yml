@@ -3,6 +3,12 @@ name: Update Homebrew Formula
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name (e.g., v1.0.0)'
+        required: true
+        type: string
 
 jobs:
   update-formula:
@@ -17,7 +23,11 @@ jobs:
       - name: Update formula
         run: |
           # Get the tag name (remove 'v' prefix if present)
-          TAG_NAME="${{ github.event.release.tag_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG_NAME="${{ github.event.inputs.tag_name }}"
+          else
+            TAG_NAME="${{ github.event.release.tag_name }}"
+          fi
           VERSION="${TAG_NAME#v}"
           
           # Calculate SHA256 of the release tarball
@@ -49,5 +59,9 @@ jobs:
             exit 0
           fi
           
-          git commit -m "Update formula for ${{ github.event.release.tag_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            git commit -m "Update formula for ${{ github.event.inputs.tag_name }}"
+          else
+            git commit -m "Update formula for ${{ github.event.release.tag_name }}"
+          fi
           git push
