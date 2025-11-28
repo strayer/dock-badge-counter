@@ -199,7 +199,13 @@ func main() {
     try counter.run()
     exit(0)
   } catch {
-    print("{\"error\": \"\(error.localizedDescription)\"}")
+    let errorResponse = ["error": error.localizedDescription]
+    if let jsonData = try? JSONEncoder().encode(errorResponse) {
+      FileHandle.standardError.write(jsonData)
+      if let newline = "\n".data(using: .utf8) {
+        FileHandle.standardError.write(newline)
+      }
+    }
     exit(1)
   }
 }
