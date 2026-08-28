@@ -44,10 +44,13 @@ final class ChildProcess {
     defer { posix_spawn_file_actions_destroy(&actions) }
     posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0)
 
-    let argv: [UnsafeMutablePointer<CChar>?] =
-      ["/bin/sh", "-c", command].map { strdup($0) } + [nil]
-    let envp: [UnsafeMutablePointer<CChar>?] =
-      environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
+    // Explicit element types: older compilers otherwise resolve `[...].map { strdup } + [nil]`
+    // against the wrong `+` overload.
+    let arguments: [String] = ["/bin/sh", "-c", command]
+    var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) }
+    argv.append(nil)
+    var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup("\($0.key)=\($0.value)") }
+    envp.append(nil)
     defer {
       for p in argv { free(p) }
       for p in envp { free(p) }
