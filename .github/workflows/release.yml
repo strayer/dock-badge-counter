@@ -7,10 +7,6 @@ on:
 permissions:
   contents: write
 
-env:
-  TAP_REPO: strayer/homebrew-tap
-  FORMULA: Formula/dock-badge-counter.rb
-
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -52,40 +48,9 @@ jobs:
           fi
           test -f examples/config.toml || { echo "::error::examples/config.toml missing"; exit 1; }
 
-      - name: Hash the release tarball
-        id: tarball
-        run: |
-          url="https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$GITHUB_REF_NAME.tar.gz"
-          curl --fail --silent --location --output release.tar.gz "$url"
-          # The tarball must contain the commit being built, not a cached older archive.
-          top=$(tar -tzf release.tar.gz | head -1 | cut -d/ -f1)
-          test "$top" = "dock-badge-counter-${GITHUB_REF_NAME#v}" || { echo "::error::unexpected tarball layout ($top)"; exit 1; }
-          echo "url=$url" >> "$GITHUB_OUTPUT"
-          echo "sha256=$(sha256sum release.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
+      # The Homebrew formula in strayer/homebrew-tap is bumped by Renovate's homebrew manager
+      # (github-tags datasource), which downloads this tag's tarball and rewrites url + sha256.
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
-
-      - name: Check out the tap
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: ${{ env.TAP_REPO }}
-          token: ${{ secrets.TAP_GITHUB_TOKEN }}
-          path: tap
-
-      - name: Bump the formula
-        working-directory: tap
-        env:
-          URL: ${{ steps.tarball.outputs.url }}
-          SHA256: ${{ steps.tarball.outputs.sha256 }}
-        run: |
-          sed -i "s|^  url \".*\"|  url \"$URL\"|" "$FORMULA"
-          sed -i "s|^  sha256 \".*\"|  sha256 \"$SHA256\"|" "$FORMULA"
-          grep -q "$URL" "$FORMULA" && grep -q "$SHA256" "$FORMULA" || { echo "::error::formula update failed"; exit 1; }
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$FORMULA"
-          git commit -m "dock-badge-counter $GITHUB_REF_NAME"
-          git push

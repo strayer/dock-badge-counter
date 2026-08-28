@@ -55,7 +55,7 @@ Sources/
 Tests/                          # Swift Testing: Delivery/PauseState, WatchConfig/CLI merge, ChildProcess,
                                 #   CommandRunner (real processes), Watcher state machine (injected seams)
 examples/                       # config.toml with defaults; sketchybar/ (Lua + shell handlers)
-.github/                        # ci.yaml, pr-labels.yml, release.yml (signed tag → release + tap bump), release-notes config
+.github/                        # ci.yaml, pr-labels.yml, release.yml (signed tag → GitHub release; Renovate bumps the tap), release-notes config
 ```
 
 Key facts:
@@ -81,9 +81,10 @@ The Homebrew formula lives in the separate tap repo **strayer/homebrew-tap** (`F
 1. Merge labeled PRs into `main`. `.github/workflows/pr-labels.yml` requires one of `breaking`, `feature`, `enhancement`, `bug`, `dependencies`; `.github/release.yml` maps them to changelog sections.
 2. Bump `let version` in `Sources/Commands/DockBadgeCounter.swift` (semantic versioning) and merge that.
 3. Push a **signed annotated tag**: `git tag -s vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z`.
-4. `.github/workflows/release.yml` verifies the tag signature and that it points at the built commit, checks the source declares the same version, hashes the tag's source tarball, creates the GitHub release with auto-generated notes, and pushes a `url`/`sha256` bump to the tap using the `TAP_GITHUB_TOKEN` secret (fine-grained PAT with contents write on `strayer/homebrew-tap`).
+4. `.github/workflows/release.yml` verifies the tag signature and that it points at the built commit, checks the source declares the same version, and creates the GitHub release with auto-generated notes.
+5. Renovate's `homebrew` manager on the tap repo picks up the new tag (github-tags datasource), downloads the tarball, rewrites `url` and `sha256`, and opens a PR that automerges once `brew audit` passes. No secrets or cross-repo tokens are involved; the tap lags a release by Renovate's schedule (tick the checkbox on the tap's Dependency Dashboard issue to force a run).
 
-Lightweight or unsigned tags are rejected; nothing in this repo's `main` is written by CI.
+Lightweight or unsigned tags are rejected; CI never writes to this repo's `main` or to the tap.
 
 ## Common Tasks
 
