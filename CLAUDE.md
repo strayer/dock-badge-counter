@@ -55,7 +55,7 @@ Sources/
 Tests/                          # Swift Testing: Delivery/PauseState, WatchConfig/CLI merge, ChildProcess,
                                 #   CommandRunner (real processes), Watcher state machine (injected seams)
 examples/                       # config.toml with defaults; sketchybar/ (Lua + shell handlers)
-Formula/                        # Homebrew formula incl. `service` block (brew services → `watch`)
+.github/                        # ci.yaml, pr-labels.yml, release.yml (signed tag → release + tap bump), release-notes config
 ```
 
 Key facts:
@@ -72,24 +72,18 @@ Key facts:
 - Dependencies: swift-argument-parser, TOMLKit. Everything else is system frameworks (AppKit, ApplicationServices).
 - Exit codes: 0 success, 1 error (incl. config errors), 64 usage errors (ArgumentParser).
 
-## Homebrew Tap
+## Releases and Homebrew
 
-This repository also functions as a Homebrew tap. Key files:
+The Homebrew formula lives in the separate tap repo **strayer/homebrew-tap** (`Formula/dock-badge-counter.rb`), installed with `brew install strayer/tap/dock-badge-counter`. It builds from the release source tarball with `swift build --configuration release --disable-sandbox` and has a `service` block (`brew services` → `watch`). This repo never edits the formula by hand.
 
-- **Formula/dock-badge-counter.rb**: Homebrew formula for installation
-- **.github/workflows/update-formula.yml**: Automated formula updates on releases
+### Release process
 
-### Release Process
+1. Merge labeled PRs into `main`. `.github/workflows/pr-labels.yml` requires one of `breaking`, `feature`, `enhancement`, `bug`, `dependencies`; `.github/release.yml` maps them to changelog sections.
+2. Bump `let version` in `Sources/Commands/DockBadgeCounter.swift` (semantic versioning) and merge that.
+3. Push a **signed annotated tag**: `git tag -s vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z`.
+4. `.github/workflows/release.yml` verifies the tag signature and that it points at the built commit, checks the source declares the same version, hashes the tag's source tarball, creates the GitHub release with auto-generated notes, and pushes a `url`/`sha256` bump to the tap using the `TAP_GITHUB_TOKEN` secret (fine-grained PAT with contents write on `strayer/homebrew-tap`).
 
-1. Create a GitHub release with semantic version tag (e.g., `v1.0.0`)
-2. GitHub Actions automatically updates the formula with correct SHA256
-3. Users can install with: `brew install strayer/dock-badge-counter/dock-badge-counter`
-
-### Formula Maintenance
-
-- The formula builds using `swift build --configuration release --disable-sandbox`
-- Requires Xcode 15.0+ and macOS
-- Updates are automated but can be done manually if needed
+Lightweight or unsigned tags are rejected; nothing in this repo's `main` is written by CI.
 
 ## Common Tasks
 
