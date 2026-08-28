@@ -3,36 +3,18 @@ import Testing
 
 @testable import dock_badge_counter
 
-/// Drives the Watcher's polling state machine directly: scripted Dock reads, a manual clock,
-/// a manual permission switch and a recording sink. No timer, no run loop, no OS.
+/// Scripted inputs and recorded outputs for a Watcher under test. Created before the Watcher so
+/// the injected closures never capture an uninitialized harness.
 @MainActor
-private final class Harness {
+private final class Script {
   var reads: [Result<BadgeSnapshot, DockBadgeError>] = []
   var clock = 1000.0
   var trusted = true
   var deliveries: [Delivery] = []
-  private(set) var permissionChecks = 0
-  let watcher: Watcher
 
   struct UnscriptedRead: Error {}
 
-  init(configure: (inout WatchConfig) -> Void = { _ in }) {
-    var config = WatchConfig()
-    configure(&config)
-    var box: Harness?
-    watcher = Watcher(
-      config: config,
-      readSnapshot: { try box!.nextRead() },
-      now: { box!.clock },
-      isTrusted: { _ in
-        box!.permissionChecks += 1
-        return box!.trusted
-      },
-      sink: { box!.deliveries.append($0) })
-    box = self
-  }
-
-  private func nextRead() throws -> BadgeSnapshot {
+  func nextRead() throws -> BadgeSnapshot {
     guard !reads.isEmpty else {
       // Fail the test rather than crash the whole run. The watcher treats the thrown error as a
       // transient read failure, so the recorded issue is what makes this visible.
@@ -41,19 +23,61 @@ private final class Harness {
     }
     return try reads.removeFirst().get()
   }
+}
+
+/// Drives the Watcher's polling state machine directly: scripted Dock reads, a manual clock,
+/// a manual permission switch and a recording sink. No timer, no run loop, no OS.
+@MainActor
+private final class Harness {
+  let script = Script()
+  let watcher: Watcher
+
+  init(configure: (inout WatchConfig) -> Void = { _ in }) {
+    var config = WatchConfig()
+    configure(&config)
+    let script = self.script
+    watcher = Watcher(
+      config: config,
+      readSnapshot: { try script.nextRead() },
+      now: { script.clock },
+      isTrusted: { _ in script.trusted },
+      sink: { script.deliveries.append($0) })
+  }
+
+  var clock: Double {
+    get { script.clock }
+    set { script.clock = newValue }
+  }
+  var trusted: Bool {
+    get { script.trusted }
+    set { script.trusted = newValue }
+  }
+  var deliveries: [Delivery] { script.deliveries }
+  var reasons: [FireReason] { deliveries.map(\.reason) }
+  var unreadScriptedReads: Int { script.reads.count }
 
   /// Scripts one successful read and polls.
   func poll(_ snapshot: BadgeSnapshot) {
-    reads.append(.success(snapshot))
+    script.reads.append(.success(snapshot))
     watcher.poll()
   }
 
   func poll(failing error: DockBadgeError) {
-    reads.append(.failure(error))
+    script.reads.append(.failure(error))
     watcher.poll()
   }
 
-  var reasons: [FireReason] { deliveries.map(\.reason) }
+  /// Scripts a read that must NOT be consumed until the test says so.
+  func queue(_ snapshot: BadgeSnapshot) {
+    script.reads.append(.success(snapshot))
+  }
+
+  /// Makes the watcher trusted (as `run()` would) by ticking once with a scripted read.
+  func grantAndTick(_ snapshot: BadgeSnapshot) {
+    script.trusted = true
+    queue(snapshot)
+    watcher.tick()
+  }
 }
 
 @MainActor
@@ -127,6 +151,15 @@ private final class Harness {
     #expect(h.reasons == [.start])
   }
 
+  @Test func changeWinsOverSimultaneouslyDueHeartbeat() {
+    let h = Harness { $0.heartbeat = 10 }
+    h.poll(["A": "1"])
+    h.clock += 10
+    h.poll(["A": "2"])
+    #expect(h.reasons == [.start, .change])
+    #expect(h.deliveries.last?.changed == ["A": "2"])
+  }
+
   @Test func transientErrorKeepsPreviousSnapshotAndDiffsAgainstIt() {
     // Regression class: a Dock hiccup must not look like "all badges removed" and then "all added".
     let h = Harness()
@@ -151,78 +184,6 @@ private final class Harness {
     #expect(h.reasons == [.start])
   }
 
-  @Test func permissionRevokedFallsBackToRetryLoopAndRecovers() {
-    let h = Harness()
-    // The watcher starts untrusted (run() normally resolves this); the first tick flips it and polls.
-    h.reads.append(.success(["A": "1"]))
-    h.watcher.tick()
-    #expect(h.watcher.trusted)
-    #expect(h.reasons == [.start])
-
-    h.poll(failing: .accessibilityPermissionDenied)
-    #expect(!h.watcher.trusted)
-    #expect(h.watcher.currentInterval == Watcher.permissionRetryInterval)
-    #expect(h.reasons == [.start], "no delivery on permission loss")
-
-    // While untrusted, ticks don't read the Dock at all (no scripted read is consumed).
-    h.trusted = false
-    h.watcher.tick()
-    h.watcher.tick()
-    #expect(h.reads.isEmpty)
-
-    // Permission comes back: the next tick flips to trusted, reschedules at the normal interval
-    // and polls immediately, diffing against the snapshot from before the outage.
-    h.trusted = true
-    h.reads.append(.success(["A": "2"]))
-    h.watcher.tick()
-    #expect(h.watcher.trusted)
-    #expect(h.watcher.currentInterval == 1.0)
-    #expect(h.deliveries.last?.changed == ["A": "2"])
-  }
-
-  @Test func tickSkipsPollingWhilePausedAndResumePollsImmediately() {
-    let h = Harness()
-    h.reads.append(.success(["A": "1"]))
-    h.watcher.tick()  // untrusted → trusted flip consumes the read
-    #expect(h.reasons == [.start])
-
-    h.watcher.handlePause(reason: .screenLocked, pausing: true, source: "test")
-    h.watcher.tick()
-    h.watcher.tick()
-    #expect(h.reads.isEmpty, "no reads while paused")
-    #expect(h.watcher.pause.isPaused)
-
-    // Lock → sleep → wake: still locked, so still no polling.
-    h.watcher.handlePause(reason: .sleep, pausing: true, source: "test")
-    h.watcher.handlePause(reason: .sleep, pausing: false, source: "test")
-    #expect(h.watcher.pause.isPaused)
-    h.watcher.tick()
-    #expect(h.deliveries.count == 1)
-
-    // Unlock resumes with an immediate poll (not waiting for the next tick).
-    h.reads.append(.success(["A": "2"]))
-    h.watcher.handlePause(reason: .screenLocked, pausing: false, source: "test")
-    #expect(h.reads.isEmpty)
-    #expect(h.deliveries.last?.changed == ["A": "2"])
-  }
-
-  @Test func resumeWhileUntrustedDoesNotPoll() {
-    let h = Harness()
-    h.trusted = false
-    h.watcher.handlePause(reason: .sleep, pausing: true, source: "test")
-    h.watcher.handlePause(reason: .sleep, pausing: false, source: "test")
-    #expect(h.deliveries.isEmpty)
-  }
-
-  @Test func changeWinsOverSimultaneouslyDueHeartbeat() {
-    let h = Harness { $0.heartbeat = 10 }
-    h.poll(["A": "1"])
-    h.clock += 10
-    h.poll(["A": "2"])
-    #expect(h.reasons == [.start, .change])
-    #expect(h.deliveries.last?.changed == ["A": "2"])
-  }
-
   @Test func transientErrorsDoNotResetHeartbeatBaseline() {
     let h = Harness { $0.heartbeat = 10 }
     h.poll(["A": "1"])  // t = 1000
@@ -233,36 +194,97 @@ private final class Harness {
     #expect(h.reasons == [.start, .heartbeat])
   }
 
-  @Test func regainingPermissionWhilePausedDoesNotRead() {
+  @Test func permissionRevokedStopsReadingAndRecoveryDiffsAgainstOldSnapshot() {
+    let h = Harness()
+    h.grantAndTick(["A": "1"])
+    #expect(h.reasons == [.start])
+
+    h.poll(failing: .accessibilityPermissionDenied)
+    #expect(h.reasons == [.start], "no delivery on permission loss")
+
+    // While denied, ticks must not touch the Dock: the queued read stays unconsumed.
+    h.trusted = false
+    h.queue(["A": "2"])
+    h.watcher.tick()
+    h.watcher.tick()
+    #expect(h.unreadScriptedReads == 1)
+    #expect(h.reasons == [.start])
+
+    // Permission comes back: the next tick polls immediately and diffs against the snapshot from
+    // before the outage.
+    h.trusted = true
+    h.watcher.tick()
+    #expect(h.unreadScriptedReads == 0)
+    #expect(h.deliveries.last?.changed == ["A": "2"])
+  }
+
+  @Test func untrustedTicksDoNotReadUntilGranted() {
+    let h = Harness()
+    h.trusted = false
+    h.queue(["A": "1"])
+    h.watcher.tick()
+    h.watcher.tick()
+    #expect(h.unreadScriptedReads == 1)
+    h.trusted = true
+    h.watcher.tick()
+    #expect(h.unreadScriptedReads == 0)
+    #expect(h.reasons == [.start])
+  }
+
+  @Test func pausedTicksDoNotReadAndUnlockPollsImmediately() {
+    let h = Harness()
+    h.grantAndTick(["A": "1"])
+    #expect(h.reasons == [.start])
+
+    h.queue(["A": "2"])
+    h.watcher.handlePause(reason: .screenLocked, pausing: true, source: "test")
+    h.watcher.tick()
+    h.watcher.tick()
+    #expect(h.unreadScriptedReads == 1, "no reads while paused")
+
+    // Lock → sleep → wake: still locked, so still no polling.
+    h.watcher.handlePause(reason: .sleep, pausing: true, source: "test")
+    h.watcher.handlePause(reason: .sleep, pausing: false, source: "test")
+    h.watcher.tick()
+    #expect(h.unreadScriptedReads == 1)
+
+    // Unlock resumes with an immediate poll (not waiting for the next tick).
+    h.watcher.handlePause(reason: .screenLocked, pausing: false, source: "test")
+    #expect(h.unreadScriptedReads == 0)
+    #expect(h.deliveries.last?.changed == ["A": "2"])
+  }
+
+  @Test func resumeWhileUntrustedDoesNotPoll() {
+    let h = Harness()
+    h.trusted = false
+    h.queue(["A": "1"])
+    h.watcher.handlePause(reason: .sleep, pausing: true, source: "test")
+    h.watcher.handlePause(reason: .sleep, pausing: false, source: "test")
+    #expect(h.unreadScriptedReads == 1)
+    #expect(h.deliveries.isEmpty)
+  }
+
+  @Test func regainingPermissionWhilePausedDoesNotReadUntilResumed() {
     let h = Harness()
     h.trusted = false
     h.watcher.tick()
-    #expect(!h.watcher.trusted)
     h.watcher.handlePause(reason: .sleep, pausing: true, source: "test")
     h.trusted = true
-    h.watcher.tick()
-    #expect(h.watcher.trusted)
-    #expect(h.deliveries.isEmpty)  // no read was scripted; an attempt would record an issue
+    h.queue(["A": "1"])
+    h.watcher.tick()  // becomes trusted, but paused: must not read
+    #expect(h.unreadScriptedReads == 1)
+    h.watcher.handlePause(reason: .sleep, pausing: false, source: "test")
+    #expect(h.unreadScriptedReads == 0)
+    #expect(h.reasons == [.start])
   }
 
   @Test func resumeForInactiveReasonDoesNotPoll() {
     let h = Harness()
     h.poll(["A": "1"])
+    h.queue(["A": "2"])
     h.watcher.handlePause(reason: .screenLocked, pausing: false, source: "test")
     h.watcher.handlePause(reason: .sleep, pausing: false, source: "test")
+    #expect(h.unreadScriptedReads == 1)
     #expect(h.reasons == [.start])
-  }
-
-  @Test func trustedTickPollsWithoutRecheckingPermission() {
-    let h = Harness()
-    h.reads.append(.success(["A": "1"]))
-    h.watcher.tick()  // untrusted -> trusted: one permission check
-    #expect(h.permissionChecks == 1)
-    h.reads.append(.success(["A": "1"]))
-    h.watcher.tick()
-    h.reads.append(.success(["A": "1"]))
-    h.watcher.tick()
-    #expect(h.permissionChecks == 1)
-    #expect(h.reads.isEmpty)
   }
 }

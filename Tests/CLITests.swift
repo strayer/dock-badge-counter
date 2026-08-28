@@ -4,7 +4,8 @@ import Testing
 @testable import dock_badge_counter
 
 /// Smoke tests against the built executable: argument parsing, exit codes and error output.
-/// Nothing here needs Accessibility.
+/// Nothing here needs Accessibility or the Dock; every run gets a clean XDG_CONFIG_HOME so the
+/// developer's real config can't leak in.
 @Suite struct CLITests {
   private static var executable: URL {
     // The test bundle sits next to the executable product in the build directory.
@@ -19,11 +20,24 @@ import Testing
     let stderr: String
   }
 
-  private func run(_ args: [String], env: [String: String] = [:]) throws -> Run {
+  /// Runs the binary with a bounded lifetime: a regression that starts the (infinite) watcher
+  /// gets killed after `timeout` and reported, instead of hanging the suite.
+  private func run(_ args: [String], env: [String: String] = [:], timeout: Double = 10) throws
+    -> Run
+  {
+    let executable = CLITests.executable
+    try #require(
+      FileManager.default.isExecutableFile(atPath: executable.path),
+      "built product missing at \(executable.path)")
+    let emptyXDG = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: emptyXDG, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: emptyXDG) }
+
     let p = Process()
-    p.executableURL = CLITests.executable
+    p.executableURL = executable
     p.arguments = args
     var environment = ProcessInfo.processInfo.environment
+    environment["XDG_CONFIG_HOME"] = emptyXDG.path
     environment.merge(env) { $1 }
     p.environment = environment
     let out = Pipe()
@@ -32,9 +46,15 @@ import Testing
     p.standardError = err
     p.standardInput = FileHandle.nullDevice
     try p.run()
+    let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+    DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
+    defer { killer.cancel() }
     let stdout = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
     let stderr = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
     p.waitUntilExit()
+    if p.terminationReason == .uncaughtSignal {
+      Issue.record("\(args) did not exit within \(timeout)s and was killed")
+    }
     return Run(status: p.terminationStatus, stdout: stdout, stderr: stderr)
   }
 
@@ -66,9 +86,11 @@ import Testing
     #expect(inf.status == 1)
     #expect(inf.stderr.contains("interval must be between"))
 
-    let missing = try run(["watch", "--config", "/nonexistent/config.toml"])
+    let missingPath = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString).appendingPathComponent("config.toml").path
+    let missing = try run(["watch", "--config", missingPath])
     #expect(missing.status == 1)
-    #expect(missing.stderr.contains("Config file not found: /nonexistent/config.toml"))
+    #expect(missing.stderr.contains("Config file not found: \(missingPath)"))
 
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -91,18 +113,5 @@ import Testing
     let r = try run(["watch"], env: ["XDG_CONFIG_HOME": xdg.path])
     #expect(r.status == 1)
     #expect(r.stderr.contains("interval must be between"))
-  }
-
-  @Test func readOutputsJSONOrPermissionError() throws {
-    // Whether Accessibility is granted depends on the machine; both outcomes must be well-formed.
-    let r = try run(["read"])
-    if r.status == 0 {
-      let obj = try JSONSerialization.jsonObject(with: Data(r.stdout.utf8)) as? [String: String]
-      #expect(obj != nil)
-    } else {
-      #expect(r.status == 1)
-      let obj = try JSONSerialization.jsonObject(with: Data(r.stderr.utf8)) as? [String: String]
-      #expect(obj?["error"]?.contains("Accessibility") == true)
-    }
   }
 }

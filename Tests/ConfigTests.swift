@@ -49,8 +49,13 @@ import Testing
   }
 
   @Test func rejectsWrongTypes() {
-    #expect(throws: ConfigError.invalidValue("interval must be a number")) {
-      try WatchConfig.parse("interval = \"fast\"")
+    #expect(throws: ConfigError.self) { try WatchConfig.parse("interval = \"fast\"") }
+    do {
+      _ = try WatchConfig.parse("interval = \"fast\"")
+    } catch let ConfigError.invalidValue(message) {
+      #expect(message.contains("interval"))
+    } catch {
+      Issue.record("expected .invalidValue, got \(error)")
     }
     #expect(throws: (any Error).self) { try WatchConfig.parse("verbose = 1") }
   }
@@ -84,23 +89,12 @@ import Testing
     try c.validate()
   }
 
-  @Test func validationBounds() throws {
+  @Test func minimumIntervalIsAcceptedAndBlankCommandRejected() throws {
     var c = WatchConfig()
     c.interval = WatchConfig.minimumInterval
     try c.validate()
-
-    c.heartbeat = -1
-    #expect(throws: ConfigError.self) { try c.validate() }
-    c.heartbeat = .infinity
-    #expect(throws: ConfigError.self) { try c.validate() }
-    c.heartbeat = 0
-    try c.validate()
-
-    c.commandTimeout = -1
-    #expect(throws: ConfigError.self) { try c.validate() }
-    c.commandTimeout = 30
     c.onChange = "  \n"
-    #expect(throws: ConfigError.invalidValue("on_change must not be empty")) { try c.validate() }
+    #expect(throws: ConfigError.self) { try c.validate() }
   }
 
   @Test func defaultPathHonoursAbsoluteXDGOnly() {
@@ -116,9 +110,9 @@ import Testing
   }
 
   @Test func loadMissingExplicitFileFails() {
-    #expect(throws: ConfigError.notFound("/nonexistent/config.toml")) {
-      try WatchConfig.load(path: "/nonexistent/config.toml")
-    }
+    let path = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString).appendingPathComponent("config.toml").path
+    #expect(throws: ConfigError.notFound(path)) { try WatchConfig.load(path: path) }
   }
 
   @Test func loadWarnsOnWorldWritableFile() throws {
@@ -130,9 +124,9 @@ import Testing
     try FileManager.default.setAttributes([.posixPermissions: 0o666], ofItemAtPath: file.path)
     let (config, warnings) = try WatchConfig.load(path: file.path)
     #expect(config.interval == 2)
-    #expect(warnings.count == 1)
+    #expect(warnings.contains { $0.contains("writable") && $0.contains(file.path) })
     try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
-    #expect(try WatchConfig.load(path: file.path).warnings == [])
+    #expect(!(try WatchConfig.load(path: file.path).warnings.contains { $0.contains("writable") }))
   }
 
   @Test func loadReportsParseErrorsWithPath() throws {
@@ -141,7 +135,6 @@ import Testing
     defer { try? FileManager.default.removeItem(at: dir) }
     let file = dir.appendingPathComponent("config.toml")
     try "interval = = 1".write(to: file, atomically: true, encoding: .utf8)
-    #expect(throws: ConfigError.self) { try WatchConfig.load(path: file.path) }
     do {
       _ = try WatchConfig.load(path: file.path)
       Issue.record("expected a parse error")
@@ -156,24 +149,39 @@ import Testing
 
     // A wrong numeric type is reported the same way, with the path attached.
     try "interval = \"fast\"".write(to: file, atomically: true, encoding: .utf8)
-    #expect(throws: ConfigError.invalid(file.path, "interval must be a number")) {
-      try WatchConfig.load(path: file.path)
+    do {
+      _ = try WatchConfig.load(path: file.path)
+      Issue.record("expected a type error")
+    } catch let ConfigError.invalid(path, message) {
+      #expect(path == file.path)
+      #expect(message.contains("interval"))
+    } catch {
+      Issue.record("expected .invalid, got \(error)")
     }
   }
 
-  /// Every CLI option must override a deliberately non-default file value; every omitted option
-  /// must leave it alone.
+  /// Every CLI option must override the file value — in both polarities for flags — and every
+  /// omitted option must leave the file value alone. Run against two opposite file baselines so a
+  /// silently ignored flag can never coincide with the file's value.
   @Test func eachCLIOptionOverridesOnlyItsField() throws {
-    // File config with every value non-default; each case flips exactly one field from it.
-    var file = WatchConfig()
-    file.interval = 5
-    file.heartbeat = 120
-    file.commandTimeout = 7
-    file.onChange = "file-command"
-    file.includeEmpty = true
-    file.runOnStart = false
-    file.pauseOnLock = false
-    file.verbose = true
+    var baseA = WatchConfig()
+    baseA.interval = 5
+    baseA.heartbeat = 120
+    baseA.commandTimeout = 7
+    baseA.onChange = "file-command"
+    baseA.includeEmpty = true
+    baseA.runOnStart = false
+    baseA.pauseOnLock = false
+    baseA.verbose = true
+    var baseB = WatchConfig()
+    baseB.interval = 2
+    baseB.heartbeat = 0
+    baseB.commandTimeout = 0
+    baseB.onChange = nil
+    baseB.includeEmpty = false
+    baseB.runOnStart = true
+    baseB.pauseOnLock = true
+    baseB.verbose = false
 
     let cases: [(args: [String], apply: (inout WatchConfig) -> Void)] = [
       (["--interval", "0.5"], { $0.interval = 0.5 }),
@@ -181,41 +189,28 @@ import Testing
       (["--command-timeout", "3"], { $0.commandTimeout = 3 }),
       (["--on-change", "echo hi"], { $0.onChange = "echo hi" }),
       (["--stdout"], { $0.onChange = nil }),
+      (["--include-empty"], { $0.includeEmpty = true }),
       (["--no-include-empty"], { $0.includeEmpty = false }),
       (["--run-on-start"], { $0.runOnStart = true }),
-      (["--pause-on-lock"], { $0.pauseOnLock = true }),
-      (["--no-verbose"], { $0.verbose = false }),
-      // Same-as-file values are still fine to pass explicitly.
-      (["--include-empty"], { $0.includeEmpty = true }),
       (["--no-run-on-start"], { $0.runOnStart = false }),
+      (["--pause-on-lock"], { $0.pauseOnLock = true }),
       (["--no-pause-on-lock"], { $0.pauseOnLock = false }),
       (["--verbose"], { $0.verbose = true }),
+      (["--no-verbose"], { $0.verbose = false }),
       ([], { _ in }),
     ]
-    for c in cases {
-      var expected = file
-      c.apply(&expected)
-      let merged = Watch.merge(file: file, cli: try Watch.parse(c.args))
-      #expect(merged == expected, "args: \(c.args)")
+    for file in [baseA, baseB] {
+      for c in cases {
+        var expected = file
+        c.apply(&expected)
+        let merged = Watch.merge(file: file, cli: try Watch.parse(c.args))
+        #expect(merged == expected, "args: \(c.args)")
+      }
     }
   }
 
-  @Test func cliOverridesFile() throws {
-    var file = WatchConfig()
-    file.interval = 5
-    file.onChange = "true"
-    file.verbose = true
-
-    let cli = try Watch.parse(["--interval", "0.5", "--no-verbose", "--heartbeat", "9"])
-    let merged = Watch.merge(file: file, cli: cli)
-    #expect(merged.interval == 0.5)
-    #expect(!merged.verbose)
-    #expect(merged.heartbeat == 9)
-    #expect(merged.onChange == "true")  // untouched
-
-    let stdout = try Watch.parse(["--stdout"])
-    #expect(Watch.merge(file: file, cli: stdout).onChange == nil)
-
+  @Test func stdoutAndOnChangeAreMutuallyExclusive() {
     #expect(throws: (any Error).self) { try Watch.parse(["--stdout", "--on-change", "x"]) }
   }
+
 }

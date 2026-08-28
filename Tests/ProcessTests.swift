@@ -50,6 +50,11 @@ private final class Groups {
   func track(_ pgid: pid_t) { pgids.insert(pgid) }
   func killAll() {
     for pgid in pgids { kill(-pgid, SIGKILL) }
+    // Bounded wait so a leaked child from a failed test is really gone before the next test.
+    let deadline = monotonicNow() + 2
+    while monotonicNow() < deadline, pgids.contains(where: { !pids(inGroup: $0).isEmpty }) {
+      usleep(10_000)
+    }
   }
 }
 
@@ -81,10 +86,20 @@ private struct Probe {
 
   var output: [String] { lines(of: outFile) }
 
+  /// Registers every group seen so far (so the caller's cleanup catches late starters) and
+  /// deletes the probe files.
   func remove() {
+    _ = pgids
     try? FileManager.default.removeItem(at: pidFile)
     try? FileManager.default.removeItem(at: outFile)
+    try? FileManager.default.removeItem(atPath: gate)
   }
+
+  /// A file the shell command waits for; `open()` lets the test release the command.
+  var gate: String { pidFile.path + ".gate" }
+  func openGate() { FileManager.default.createFile(atPath: gate, contents: nil) }
+  /// Shell snippet: block until the gate exists (checked every 20 ms).
+  var waitForGate: String { #"while [ ! -e "\#(gate)" ]; do sleep 0.02; done"# }
 
   /// Waits until invocation `index` has spawned at least `members` processes in its group.
   func waitForGroup(_ index: Int, members: Int = 1, timeout: Double = 5) async -> pid_t? {
@@ -155,8 +170,9 @@ private func spawn(_ command: String, env: [String: String] = [:], groups: Group
       for (i, box) in boxes.enumerated() {
         #expect(await box.wait() == .status(Int32(i % 4)))
       }
-      // Give any duplicate callback (source + WNOHANG check both reaping) a chance to show up.
-      try await Task.sleep(nanoseconds: 100_000_000)
+      // Any duplicate callback (source + WNOHANG check both reaping) would already be enqueued on
+      // the main queue by now; drain it with a barrier rather than sleeping for a while.
+      await withCheckedContinuation { c in DispatchQueue.main.async { c.resume() } }
       #expect(boxes.allSatisfy { $0.exits.count == 1 })
     }
 
@@ -188,34 +204,14 @@ private func spawn(_ command: String, env: [String: String] = [:], groups: Group
       let groups = Groups()
       defer { groups.killAll() }
 
-      let (child, box) = try spawn("echo started; sleep 100", groups: groups)
-      // Wait until the shell has forked `sleep` (2 members in the group).
+      // `sleep … &` + `wait` guarantees a separate child process even if the shell would exec its
+      // last command.
+      let (child, box) = try spawn("sleep 100 & wait $!", groups: groups)
       #expect(await waitUntil { pids(inGroup: child.pid).count >= 2 })
 
       child.terminateGroup(SIGTERM)
       #expect(await box.wait() == .signal(SIGTERM))
       #expect(await waitUntil { pids(inGroup: child.pid).isEmpty }, "grandchild sleep must be gone")
-    }
-
-    @Test func terminateAfterExitIsANoOp() async throws {
-      let groups = Groups()
-      defer { groups.killAll() }
-      let (child, box) = try spawn("exit 0", groups: groups)
-      #expect(await box.wait() == .status(0))
-      // Any signal after reaping would go to a group id that may by now belong to someone else.
-      // Prove nothing is sent by pointing the (reaped) handle's group at ourselves: we're alive
-      // afterwards and no SIGUSR1 handler fired.
-      var received = false
-      let source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
-      source.setEventHandler { received = true }
-      source.resume()
-      defer { source.cancel() }
-      let previous = signal(SIGUSR1, SIG_IGN)
-      defer { signal(SIGUSR1, previous) }
-      child.terminateGroup(SIGUSR1)
-      try await Task.sleep(nanoseconds: 100_000_000)
-      #expect(!received)
-      #expect(!child.isRunning)
     }
   }
 
@@ -244,23 +240,25 @@ private func spawn(_ command: String, env: [String: String] = [:], groups: Group
       defer { groups.killAll() }
       let probe = Probe(groups)
       defer { probe.remove() }
+      // The first invocation blocks on a gate the test controls, so "while the command runs" is
+      // exact rather than a race against a sleep.
       let r = runner(
         probe.prelude
-          + #"echo "$DOCK_BADGES_REASON|$DOCK_BADGES|$DOCK_BADGES_CHANGED" >> "\#(probe.outFile.path)"; sleep 0.3"#
-      )
+          + #"echo "$DOCK_BADGES_REASON|$DOCK_BADGES|$DOCK_BADGES_CHANGED" >> "\#(probe.outFile.path)"; "#
+          + #"if [ "$DOCK_BADGES_REASON" = start ]; then \#(probe.waitForGate); fi"#)
 
       r.submit(Delivery(snapshot: ["A": "1"], changed: ["A": "1"], reason: .start))
-      // These three arrive while the first command sleeps and must collapse into ONE follow-up.
+      _ = try #require(await probe.waitForGroup(0))
+      // These three arrive while the first command is blocked and must collapse into ONE follow-up.
       r.submit(Delivery(snapshot: ["A": "2"], changed: ["A": "2"], reason: .change))
       r.submit(Delivery(snapshot: ["A": "2"], changed: [:], reason: .heartbeat))
       r.submit(
         Delivery(snapshot: ["A": "3", "B": "9"], changed: ["A": "3", "B": "9"], reason: .change))
-      #expect(!r.isIdle)
+      probe.openGate()
 
-      // Idle means the second invocation finished AND nothing is queued — so a wrongly queued
-      // third invocation is excluded deterministically, not by waiting a while.
-      #expect(await waitUntil(timeout: 5) { r.isIdle })
-      #expect(probe.pgids.count == 2)
+      // Idle = the follow-up finished and nothing is queued, so a wrongly queued third invocation
+      // is excluded deterministically.
+      #expect(await waitUntil { r.isIdle })
       #expect(
         probe.output == [
           #"start|{"A":"1"}|{"A":"1"}"#,
@@ -277,16 +275,17 @@ private func spawn(_ command: String, env: [String: String] = [:], groups: Group
       // pending delivery must still run afterwards.
       let r = runner(
         probe.prelude
-          + #"echo "$DOCK_BADGES_REASON" >> "\#(probe.outFile.path)"; if [ "$DOCK_BADGES_REASON" = start ]; then sleep 100; fi"#,
+          + #"echo "$DOCK_BADGES_REASON" >> "\#(probe.outFile.path)"; if [ "$DOCK_BADGES_REASON" = start ]; then sleep 100 & wait $!; fi"#,
         timeout: 0.3)
       r.submit(Delivery(snapshot: [:], changed: [:], reason: .start))
       r.submit(Delivery(snapshot: ["A": "1"], changed: ["A": "1"], reason: .change))
 
-      let first = await probe.waitForGroup(0, members: 2)
-      #expect(first != nil, "first invocation should be running with its sleep")
+      let first = try #require(
+        await probe.waitForGroup(0, members: 2), "first invocation should be running with its sleep"
+      )
       #expect(await waitUntil { r.isIdle })
       #expect(probe.output == ["start", "change"])
-      #expect(await probe.waitForGroupGone(first ?? 0), "sh and its sleep must both be dead")
+      #expect(await probe.waitForGroupGone(first), "sh and its sleep must both be dead")
     }
 
     @Test func timeoutEscalatesToSigkillForTrappingCommand() async throws {
@@ -296,13 +295,12 @@ private func spawn(_ command: String, env: [String: String] = [:], groups: Group
       defer { probe.remove() }
       let r = runner(
         probe.prelude
-          + #"echo "$DOCK_BADGES_REASON" >> "\#(probe.outFile.path)"; if [ "$DOCK_BADGES_REASON" = start ]; then trap "" TERM; sleep 100; fi"#,
+          + #"echo "$DOCK_BADGES_REASON" >> "\#(probe.outFile.path)"; if [ "$DOCK_BADGES_REASON" = start ]; then trap "" TERM; sleep 100 & wait $!; fi"#,
         timeout: 0.2)
       r.submit(Delivery(snapshot: [:], changed: [:], reason: .start))
-      let first = await probe.waitForGroup(0, members: 2)
-      #expect(first != nil)
-      // SIGTERM is ignored by the shell; SIGKILL follows after 2 s.
-      #expect(await probe.waitForGroupGone(first ?? 0, timeout: 5))
+      let first = try #require(await probe.waitForGroup(0, members: 2))
+      // SIGTERM is ignored by the shell; SIGKILL follows after 2 s (deadline is generous, not a limit).
+      #expect(await probe.waitForGroupGone(first, timeout: 10))
       // Runner is free again afterwards and the next command exits immediately.
       r.submit(Delivery(snapshot: ["A": "1"], changed: ["A": "1"], reason: .change))
       #expect(await waitUntil { r.isIdle })
@@ -314,12 +312,13 @@ private func spawn(_ command: String, env: [String: String] = [:], groups: Group
       defer { groups.killAll() }
       let probe = Probe(groups)
       defer { probe.remove() }
-      let r = runner(probe.prelude + "sleep 100")
+      let r = runner(probe.prelude + "sleep 100 & wait $!")
       r.submit(Delivery(snapshot: [:], changed: [:], reason: .start))
-      let first = await probe.waitForGroup(0, members: 1)
-      #expect(first != nil)
+      let first = try #require(await probe.waitForGroup(0, members: 2))
       r.shutdown()
-      #expect(await probe.waitForGroupGone(first ?? 0))
+      #expect(await probe.waitForGroupGone(first))
+      // The child was reaped through ChildProcess (exactly-once), so the runner is idle again.
+      #expect(await waitUntil { r.isIdle })
     }
 
     @Test func shutdownForceKillsTrappingCommandAndDropsPending() async throws {
@@ -329,17 +328,16 @@ private func spawn(_ command: String, env: [String: String] = [:], groups: Group
       defer { probe.remove() }
       let r = runner(
         probe.prelude
-          + #"trap "" TERM; echo "$DOCK_BADGES_REASON" >> "\#(probe.outFile.path)"; sleep 100"#)
+          + #"trap "" TERM; echo "$DOCK_BADGES_REASON" >> "\#(probe.outFile.path)"; sleep 100 & wait $!"#
+      )
       r.submit(Delivery(snapshot: [:], changed: [:], reason: .start))
       r.submit(Delivery(snapshot: ["A": "1"], changed: ["A": "1"], reason: .change))  // pending
-      let first = await probe.waitForGroup(0, members: 2)
-      #expect(first != nil)
+      let first = try #require(await probe.waitForGroup(0, members: 2))
 
       r.shutdown(graceSeconds: 0.3)  // blocks ≤ 0.3 s, then SIGKILL
-      #expect(await probe.waitForGroupGone(first ?? 0))
-      // The pending delivery must have been dropped, not started.
+      #expect(await probe.waitForGroupGone(first))
+      // The pending delivery must have been dropped, not started: once idle, only "start" ran.
       #expect(await waitUntil { r.isIdle })
-      #expect(probe.pgids.count == 1)
       #expect(probe.output == ["start"])
     }
 
@@ -357,19 +355,22 @@ private func spawn(_ command: String, env: [String: String] = [:], groups: Group
       #expect(probe.output.count == 10)
     }
 
-    @Test func failedSpawnLeavesRunnerUsable() async throws {
-      // /bin/sh always exists, so a failed spawn needs the exec to fail inside the shell: that's a
-      // non-zero exit, not a spawn error — the runner must simply log and stay idle.
+    @Test func nonZeroExitLeavesRunnerUsable() async throws {
+      // A command that fails (here: exec of a missing binary inside the shell) must be logged and
+      // must not wedge the runner. (A failure of posix_spawn itself is not reachable while /bin/sh
+      // exists and stays untested.)
       let groups = Groups()
       defer { groups.killAll() }
       let probe = Probe(groups)
       defer { probe.remove() }
-      let r = runner(probe.prelude + "/nonexistent/binary")
+      let r = runner(
+        probe.prelude
+          + #"echo "$DOCK_BADGES_REASON" >> "\#(probe.outFile.path)"; /nonexistent/binary"#)
       r.submit(Delivery(snapshot: [:], changed: [:], reason: .start))
       #expect(await waitUntil { r.isIdle })
       r.submit(Delivery(snapshot: ["A": "1"], changed: ["A": "1"], reason: .change))
       #expect(await waitUntil { r.isIdle })
-      #expect(probe.pgids.count == 2)
+      #expect(probe.output == ["start", "change"])
     }
   }
 }

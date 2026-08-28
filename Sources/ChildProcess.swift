@@ -72,6 +72,15 @@ final class ChildProcess {
 
   var isRunning: Bool { !reaped }
 
+  /// Reaps the child now if it has already exited (delivering `onExit`), without blocking.
+  /// Lets a caller that must wait synchronously do so through the owner, preserving exactly-once
+  /// delivery instead of calling `waitpid` behind this object's back.
+  @discardableResult
+  func reapIfExited() -> Bool {
+    reap(block: false)
+    return reaped
+  }
+
   /// Sends `signal` to the child's whole process group.
   func terminateGroup(_ signal: Int32 = SIGTERM) {
     guard !reaped else { return }

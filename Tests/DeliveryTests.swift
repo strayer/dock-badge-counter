@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import dock_badge_counter
@@ -73,11 +74,17 @@ import Testing
     #expect(!repeated)  // idempotent
   }
 
-  @Test func jsonIsSortedCompactAndUnescaped() throws {
-    // The wire format consumers script against: deterministic key order, no escaped slashes,
-    // non-ASCII badge glyphs and "99+" verbatim.
-    let json = try JSON.encode(["Zen": "•", "App/Two": "99+", "Mail": "3"])
-    #expect(json == #"{"App/Two":"99+","Mail":"3","Zen":"•"}"#)
+  @Test func jsonIsValidDeterministicSingleLineAndUnescaped() throws {
+    // The wire format consumers script against: a single line of valid JSON, the same bytes for
+    // the same snapshot regardless of dictionary order, and no `\/` escaping of app names.
+    let snapshot = ["Zen": "•", "App/Two": "99+", "Mail": "3"]
+    let json = try JSON.encode(snapshot)
+    #expect(!json.contains("\n"))
+    #expect(!json.contains("\\/"))
+    let decoded = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: String]
+    #expect(decoded == snapshot)
+    let reordered = Dictionary(uniqueKeysWithValues: snapshot.sorted { $0.key > $1.key })
+    #expect(try JSON.encode(reordered) == json)
     #expect(try JSON.encode([:]) == "{}")
   }
 }
