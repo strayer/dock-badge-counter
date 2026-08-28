@@ -160,8 +160,17 @@ final class Watcher {
   }
 
   private func deliver(_ delivery: Delivery) {
-    let changedJSON = (try? JSON.encode(delivery.changed)) ?? "{}"
-    log.info("\(delivery.reason.rawValue): \(changedJSON)")
+    // Heartbeats carry no new information and would fill the log at a steady rate, so they are
+    // debug-only (with the full state, since their diff is empty by definition). `start` and
+    // `change` log what changed.
+    switch delivery.reason {
+    case .heartbeat:
+      let snapshotJSON = (try? JSON.encode(delivery.snapshot)) ?? "{}"
+      log.debug("heartbeat: \(snapshotJSON)")
+    case .start, .change:
+      let changedJSON = (try? JSON.encode(delivery.changed)) ?? "{}"
+      log.info("\(delivery.reason.rawValue): \(changedJSON)")
+    }
     sink(delivery)
   }
 

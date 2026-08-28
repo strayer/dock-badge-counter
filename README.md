@@ -120,6 +120,7 @@ swift build
 ./scripts/test.sh   # `swift test`; picks an installed Xcode.app automatically when only the
                     # Command Line Tools are selected (Swift Testing needs its macro plugin)
 swift format --in-place --recursive Sources Tests
+mise run release    # bump the version, tag the next release (derived from merged PR labels) and push
 ```
 
 Pre-commit hooks run automatically on `git commit`:

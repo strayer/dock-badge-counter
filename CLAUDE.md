@@ -21,7 +21,7 @@ swift run dock-badge-counter watch --verbose            # watcher, NDJSON to std
 swift run dock-badge-counter watch --config examples/sketchybar/config.toml
 
 # Run tests (wrapper around `swift test`, see note in Architecture about DEVELOPER_DIR)
-./scripts/test.sh
+./scripts/test.sh          # or: mise run test
 
 # Format code
 swift format --in-place --recursive Sources Tests
@@ -78,11 +78,12 @@ The Homebrew formula lives in the separate tap repo **strayer/homebrew-tap** (`F
 
 ### Release process
 
+`let version` in `Sources/Commands/DockBadgeCounter.swift` must match the release tag; `scripts/release.sh` bumps it as part of tagging, so never bump it in a feature PR.
+
 1. Merge labeled PRs into `main`. `.github/workflows/pr-labels.yml` requires one of `breaking`, `feature`, `enhancement`, `bug`, `dependencies`; `.github/release.yml` maps them to changelog sections.
-2. Bump `let version` in `Sources/Commands/DockBadgeCounter.swift` (semantic versioning) and merge that.
-3. Push a **signed annotated tag**: `git tag -s vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z`.
-4. `.github/workflows/release.yml` verifies the tag signature and that it points at the built commit, checks the source declares the same version, and creates the GitHub release with auto-generated notes.
-5. Renovate's `homebrew` manager on the tap repo picks up the new tag (github-tags datasource), downloads the tarball, rewrites `url` and `sha256`, and opens a PR that automerges once `brew audit` passes. No secrets or cross-repo tokens are involved; the tap lags a release by Renovate's schedule (tick the checkbox on the tap's Dependency Dashboard issue to force a run).
+2. Run `mise run release` (= `scripts/release.sh`, optionally with an explicit `vX.Y.Z`) on a clean, up-to-date `main`. It lists the PRs merged since the last tag, derives the bump from their labels (`breaking` → major, `feature`/`enhancement` → minor, else patch), confirms, commits the version bump (`chore: release vX.Y.Z`), pushes it to `main` (admins bypass the PR-only ruleset), then creates a signed annotated tag on it and pushes that.
+3. `.github/workflows/release.yml` verifies the tag signature, that it points at the built commit and that the source declares the same version, then creates the GitHub release with auto-generated notes.
+4. Renovate's `homebrew` manager on the tap repo picks up the new tag (github-tags datasource), downloads the tarball, rewrites `url` and `sha256`, and opens a PR that automerges once `brew audit` passes. No secrets or cross-repo tokens are involved; the tap lags a release by Renovate's schedule (tick the checkbox on the tap's Dependency Dashboard issue to force a run).
 
 Lightweight or unsigned tags are rejected; CI never writes to this repo's `main` or to the tap.
 
