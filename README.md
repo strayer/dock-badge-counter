@@ -41,30 +41,33 @@ Output is a JSON object of app name → badge text on stdout. Badge values are s
 ### Watch mode
 
 ```bash
-dock-badge-counter watch [--config PATH] [--interval SECONDS] [--on-change CMD] [--heartbeat SECONDS] [--verbose]
+dock-badge-counter watch [--config PATH] [--interval SECONDS] [--on-change CMD | --stdout]
+                         [--heartbeat SECONDS] [--command-timeout SECONDS] [--verbose]
 ```
 
-`watch` polls the Dock (default: once per second, ~1 ms per poll) and reports only **changes**:
+`watch` polls the Dock (default: once per second) and delivers a snapshot on **start**, on every **change**, and optionally as a periodic **heartbeat**. Every delivery carries the full snapshot plus the diff, so consumers can be stateless.
 
 - With `on_change` set, the command runs via `/bin/sh -c` with these environment variables:
 
-  | Variable              | Content                                                                 |
-  | --------------------- | ----------------------------------------------------------------------- |
-  | `DOCK_BADGES`         | full snapshot, e.g. `{"Mail":"3","Slack":"12"}`                        |
-  | `DOCK_BADGES_CHANGED` | only apps whose badge changed; a removed badge is reported as `""`      |
-  | `DOCK_BADGES_REASON`  | `start`, `change` or `heartbeat`                                        |
+  | Variable              | Content                                                                          |
+  | --------------------- | -------------------------------------------------------------------------------- |
+  | `DOCK_BADGES`         | full snapshot, e.g. `{"Mail":"3","Slack":"12"}`                                 |
+  | `DOCK_BADGES_CHANGED` | apps whose badge changed since the last delivery; a removed badge is reported as `""` |
+  | `DOCK_BADGES_REASON`  | `start`, `change` or `heartbeat`                                                 |
 
-- Without `on_change`, every snapshot is printed to stdout as one JSON line, so you can pipe it into anything:
+  Commands never overlap: while one is running, further changes are coalesced into a single follow-up delivery. A command that runs longer than `command_timeout` (default 30 s) is killed together with everything it spawned.
+
+- Without `on_change` (or with `--stdout`), every snapshot is printed to stdout as one JSON line, so you can pipe it into anything:
 
   ```bash
   dock-badge-counter watch | jq -c 'to_entries | map("\(.key): \(.value)")'
   ```
 
-Polling pauses while the Mac sleeps or the screen is locked, and resumes with an immediate poll.
+Polling pauses while the Mac sleeps or the screen is locked (including when the watcher starts on a locked screen), and resumes with an immediate poll. Transient Accessibility errors — e.g. while the Dock restarts — never produce a snapshot; the last good state is kept until the next successful poll.
 
 #### Configuration
 
-Settings are read from `$XDG_CONFIG_HOME/dock-badge-counter/config.toml` (default `~/.config/dock-badge-counter/config.toml`); command-line options override the file. All keys are optional — see [`examples/config.toml`](examples/config.toml) for the full list with defaults:
+Settings are read from `$XDG_CONFIG_HOME/dock-badge-counter/config.toml` (default `~/.config/dock-badge-counter/config.toml`); command-line options override the file. All keys are optional and unknown keys are rejected — see [`examples/config.toml`](examples/config.toml) for the full list with defaults:
 
 ```toml
 interval = 1.0
@@ -80,6 +83,8 @@ brew services start dock-badge-counter
 
 This registers a launchd user agent running `dock-badge-counter watch`. Logs go to `$(brew --prefix)/var/log/dock-badge-counter.log`. Restart the service after editing the config.
 
+Because `on_change` is executed by a shell, the config file is effectively a script: keep it writable only by your user (the watcher logs a warning otherwise).
+
 ### SketchyBar example
 
 [`examples/sketchybar/`](examples/sketchybar/) contains a config and handlers for both the Lua (SbarLua) and shell flavours of SketchyBar. The flow is:
@@ -88,7 +93,7 @@ This registers a launchd user agent running `dock-badge-counter watch`. Logs go 
 dock-badge-counter watch ──(on change: sketchybar --trigger dock_badges BADGES=…)──▶ SketchyBar ──▶ your handler
 ```
 
-SketchyBar never polls or spawns anything itself; it only receives an event when a badge actually changes. With SbarLua the `BADGES` JSON arrives as a ready-to-use Lua table.
+SketchyBar never polls or spawns anything itself; it receives an event on start, on every change, and — with the example config's `heartbeat = 60` — once a minute so a reloaded bar recovers its state. With SbarLua the `BADGES` JSON arrives as a ready-to-use Lua table.
 
 ## Accessibility permission
 
@@ -101,7 +106,18 @@ Note that macOS ties the grant to the binary's code signature. Homebrew builds a
 
 ## How it works
 
-The Dock exposes its icons through the Accessibility API; each icon's `AXStatusLabel` attribute is the badge text. The Dock does not send accessibility notifications when a badge changes, so watch mode polls — a full walk of ~20 icons takes about a millisecond and costs the Dock ~0.02 ms of CPU, which is negligible even at 1 Hz. Only diffs cross the process boundary.
+The Dock exposes its icons through the Accessibility API; each icon's `AXStatusLabel` attribute is the badge text. Only items with the `AXApplicationDockItem` subrole are considered, so folders, the Trash and minimized windows are ignored. Keys are the Dock's display titles; if two items share a title, the first one wins.
+
+The Dock does not send accessibility notifications when a badge changes, so watch mode polls. On the author's M-series Mac with ~20 Dock icons, a full walk measured about 1 ms wall time and ~0.02 ms of Dock CPU per poll (200 iterations in-process), i.e. a few CPU-seconds per day at 1 Hz. The watcher only *acts* on diffs; nothing is spawned while badges are unchanged (unless a heartbeat is configured).
+
+## Development
+
+```bash
+swift build
+swift test          # needs a full Xcode toolchain for the Swift Testing macros; with only the
+                    # Command Line Tools installed, point DEVELOPER_DIR at an Xcode.app
+swift format --in-place --recursive Sources Tests
+```
 
 ## License
 

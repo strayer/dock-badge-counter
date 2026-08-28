@@ -1,37 +1,49 @@
 import AppKit
+import CoreGraphics
 import Foundation
-
-/// Why a snapshot is being delivered.
-enum FireReason: String {
-  case start, change, heartbeat
-}
 
 /// Polls the Dock on a timer, diffs snapshots and delivers changes either to a shell command
 /// (with `DOCK_BADGES*` environment variables) or as NDJSON on stdout.
+///
+/// All mutable state lives on the main actor; Dispatch/notification callbacks hop onto it.
+@MainActor
 final class Watcher {
+  private static let permissionRetryInterval = 5.0
+
   private let config: WatchConfig
   private let reader: BadgeReader
   private let log: Logger
+  private let runner: CommandRunner?
   private var timer: DispatchSourceTimer?
+  private var signalSources: [DispatchSourceSignal] = []
   private var previous: BadgeSnapshot?
-  private var lastFire = Date.distantPast
-  private var paused = false
+  private var lastFire: Double?
+  private var pause = PauseState()
   private var trusted = false
-  private let commandQueue = DispatchQueue(label: "dock-badge-counter.command")
 
   init(config: WatchConfig) {
     self.config = config
     self.reader = BadgeReader(includeEmpty: config.includeEmpty)
     self.log = Logger(verbose: config.verbose)
+    self.runner = config.onChange.map {
+      CommandRunner(
+        command: $0, timeout: config.commandTimeout, log: Logger(verbose: config.verbose))
+    }
   }
 
   /// Blocks forever; the process is expected to be terminated by launchd / a signal.
   func run() -> Never {
     log.info(
-      "starting: interval=\(config.interval)s heartbeat=\(config.heartbeat)s pause_on_lock=\(config.pauseOnLock) mode=\(config.onChange == nil ? "stdout" : "command")"
+      "starting: interval=\(config.interval)s heartbeat=\(config.heartbeat)s pause_on_lock=\(config.pauseOnLock) mode=\(runner == nil ? "stdout" : "command")"
     )
     installSignalHandlers()
-    if config.pauseOnLock { installPauseObservers() }
+    if config.pauseOnLock {
+      installPauseObservers()
+      if Watcher.screenIsLocked() {
+        pause.add(.screenLocked)
+        log.debug("starting paused: screen is locked")
+      }
+    }
 
     trusted = BadgeReader.isTrusted(prompt: true)
     if !trusted {
@@ -41,15 +53,18 @@ final class Watcher {
     }
 
     let source = DispatchSource.makeTimerSource(queue: .main)
-    let interval = trusted ? config.interval : 5.0
-    source.schedule(
-      deadline: .now(), repeating: interval, leeway: .milliseconds(Int(interval * 200)))
-    source.setEventHandler { [weak self] in self?.tick() }
-    source.resume()
+    source.setEventHandler { MainActor.assumeIsolated { self.tick() } }
     timer = source
+    schedule(interval: trusted ? config.interval : Watcher.permissionRetryInterval)
+    source.resume()
 
     RunLoop.main.run()
     exit(0)
+  }
+
+  private func schedule(interval: Double) {
+    let leeway = DispatchTimeInterval.milliseconds(max(1, Int((interval * 200).rounded())))
+    timer?.schedule(deadline: .now(), repeating: interval, leeway: leeway)
   }
 
   private func tick() {
@@ -57,11 +72,9 @@ final class Watcher {
       guard BadgeReader.isTrusted(prompt: false) else { return }
       trusted = true
       log.info("accessibility permission granted")
-      timer?.schedule(
-        deadline: .now(), repeating: config.interval,
-        leeway: .milliseconds(Int(config.interval * 200)))
+      schedule(interval: config.interval)
     }
-    guard !paused else { return }
+    guard !pause.isPaused else { return }
     poll()
   }
 
@@ -69,119 +82,198 @@ final class Watcher {
     let snapshot: BadgeSnapshot
     do {
       snapshot = try reader.read()
+    } catch DockBadgeError.accessibilityPermissionDenied {
+      // Revoked after start: fall back to the slow retry loop, keep the last snapshot.
+      trusted = false
+      log.error("accessibility permission lost; waiting for it to be granted again")
+      schedule(interval: Watcher.permissionRetryInterval)
+      return
     } catch {
+      // Transient (Dock restarting/busy): keep the previous snapshot, try again next tick.
       log.error("poll failed: \(error.localizedDescription)")
       return
     }
     log.debug("poll: \(snapshot.count) badge(s)")
 
+    let now = monotonicNow()
     guard let previous else {
       self.previous = snapshot
-      if config.runOnStart { fire(snapshot, changed: snapshot, reason: .start) }
+      lastFire = now
+      if config.runOnStart {
+        deliver(Delivery(snapshot: snapshot, changed: snapshot, reason: .start))
+      }
       return
     }
 
-    let changed = Watcher.diff(old: previous, new: snapshot)
+    let changed = Delivery.diff(old: previous, new: snapshot)
     if !changed.isEmpty {
       self.previous = snapshot
-      fire(snapshot, changed: changed, reason: .change)
-    } else if config.heartbeat > 0, Date().timeIntervalSince(lastFire) >= config.heartbeat {
-      fire(snapshot, changed: [:], reason: .heartbeat)
+      lastFire = now
+      deliver(Delivery(snapshot: snapshot, changed: changed, reason: .change))
+    } else if config.heartbeat > 0, now - (lastFire ?? now) >= config.heartbeat {
+      lastFire = now
+      deliver(Delivery(snapshot: snapshot, changed: [:], reason: .heartbeat))
     }
   }
 
-  /// Keys whose value differs; keys that disappeared are reported with an empty value.
-  static func diff(old: BadgeSnapshot, new: BadgeSnapshot) -> BadgeSnapshot {
-    var changed: BadgeSnapshot = [:]
-    for (app, badge) in new where old[app] != badge { changed[app] = badge }
-    for app in old.keys where new[app] == nil { changed[app] = "" }
-    return changed
-  }
-
-  private func fire(_ snapshot: BadgeSnapshot, changed: BadgeSnapshot, reason: FireReason) {
-    lastFire = Date()
-    let json: String
-    let changedJSON: String
+  private func deliver(_ delivery: Delivery) {
+    let changedJSON = (try? JSON.encode(delivery.changed)) ?? "{}"
+    log.info("\(delivery.reason.rawValue): \(changedJSON)")
+    if let runner {
+      runner.submit(delivery)
+      return
+    }
     do {
-      json = try JSON.encode(snapshot)
-      changedJSON = try JSON.encode(changed)
-    } catch {
-      log.error("\(error.localizedDescription)")
-      return
-    }
-    log.info("\(reason.rawValue): \(changedJSON)")
-
-    guard let command = config.onChange else {
-      print(json)
+      print(try JSON.encode(delivery.snapshot))
       fflush(stdout)
-      return
+    } catch {
+      log.error(error.localizedDescription)
     }
-    var env = ProcessInfo.processInfo.environment
-    env["DOCK_BADGES"] = json
-    env["DOCK_BADGES_CHANGED"] = changedJSON
-    env["DOCK_BADGES_REASON"] = reason.rawValue
-    // Serial queue: commands run in order and never overlap, but don't block polling.
-    commandQueue.async { [log] in
-      let process = Process()
-      process.executableURL = URL(fileURLWithPath: "/bin/sh")
-      process.arguments = ["-c", command]
-      process.environment = env
-      process.standardInput = FileHandle.nullDevice
-      do {
-        try process.run()
-        process.waitUntilExit()
-        if process.terminationStatus != 0 {
-          log.error("on_change command exited with status \(process.terminationStatus)")
-        }
-      } catch {
-        log.error("failed to run on_change command: \(error.localizedDescription)")
-      }
-    }
+  }
+
+  // MARK: - Pause on sleep / lock
+
+  private static func screenIsLocked() -> Bool {
+    guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
+    return session["CGSSessionScreenIsLocked"] as? Bool ?? false
   }
 
   private func installPauseObservers() {
     let ws = NSWorkspace.shared.notificationCenter
     let dnc = DistributedNotificationCenter.default()
-    let pause: [(NotificationCenter, Notification.Name)] = [
-      (ws, NSWorkspace.willSleepNotification),
-      (dnc, Notification.Name("com.apple.screenIsLocked")),
+    let transitions: [(NotificationCenter, Notification.Name, PauseReason, Bool)] = [
+      (ws, NSWorkspace.willSleepNotification, .sleep, true),
+      (ws, NSWorkspace.didWakeNotification, .sleep, false),
+      (dnc, Notification.Name("com.apple.screenIsLocked"), .screenLocked, true),
+      (dnc, Notification.Name("com.apple.screenIsUnlocked"), .screenLocked, false),
     ]
-    let resume: [(NotificationCenter, Notification.Name)] = [
-      (ws, NSWorkspace.didWakeNotification),
-      (dnc, Notification.Name("com.apple.screenIsUnlocked")),
-    ]
-    for (center, name) in pause {
-      center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-        self?.log.debug("paused (\(name.rawValue))")
-        self?.paused = true
-      }
-    }
-    for (center, name) in resume {
-      center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-        guard let self else { return }
-        self.log.debug("resumed (\(name.rawValue))")
-        self.paused = false
-        if self.trusted { self.poll() }
+    for (center, name, reason, pausing) in transitions {
+      center.addObserver(forName: name, object: nil, queue: .main) { _ in
+        MainActor.assumeIsolated {
+          self.handlePause(reason: reason, pausing: pausing, source: name.rawValue)
+        }
       }
     }
   }
+
+  private func handlePause(reason: PauseReason, pausing: Bool, source: String) {
+    if pausing {
+      if pause.add(reason) { log.debug("paused (\(source))") }
+    } else if pause.remove(reason) {
+      log.debug("resumed (\(source))")
+      if trusted { poll() }
+    }
+  }
+
+  // MARK: - Shutdown
 
   private func installSignalHandlers() {
     for sig in [SIGTERM, SIGINT] {
       signal(sig, SIG_IGN)
       let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-      source.setEventHandler { [log] in
-        log.info("exiting on signal \(sig)")
-        exit(0)
+      source.setEventHandler {
+        MainActor.assumeIsolated {
+          self.log.info("exiting on signal \(sig)")
+          self.runner?.shutdown()
+          exit(0)
+        }
       }
       source.resume()
       signalSources.append(source)
     }
   }
-  private var signalSources: [DispatchSourceSignal] = []
 }
 
-struct Logger {
+/// Runs the `on_change` command for deliveries, one at a time. While a command is running, newer
+/// deliveries are coalesced into a single pending one, so a slow command can never build up a queue.
+@MainActor
+final class CommandRunner {
+  private let command: String
+  private let timeout: Double
+  private let log: Logger
+  private var running: ChildProcess?
+  private var timeoutWork: DispatchWorkItem?
+  private var pending: Delivery?
+
+  init(command: String, timeout: Double, log: Logger) {
+    self.command = command
+    self.timeout = timeout
+    self.log = log
+  }
+
+  func submit(_ delivery: Delivery) {
+    if running != nil {
+      pending = pending.map { $0.merged(with: delivery) } ?? delivery
+      log.debug("command still running; coalesced pending delivery")
+      return
+    }
+    start(delivery)
+  }
+
+  /// Terminates a running command and everything it spawned; used on shutdown.
+  func shutdown() {
+    running?.terminateGroup(SIGTERM)
+  }
+
+  private func start(_ delivery: Delivery) {
+    let json: String
+    let changedJSON: String
+    do {
+      json = try JSON.encode(delivery.snapshot)
+      changedJSON = try JSON.encode(delivery.changed)
+    } catch {
+      log.error(error.localizedDescription)
+      return
+    }
+    var env = ProcessInfo.processInfo.environment
+    env["DOCK_BADGES"] = json
+    env["DOCK_BADGES_CHANGED"] = changedJSON
+    env["DOCK_BADGES_REASON"] = delivery.reason.rawValue
+
+    let child: ChildProcess
+    do {
+      child = try ChildProcess(shellCommand: command, environment: env) { [weak self] exit in
+        self?.finished(exit)
+      }
+    } catch {
+      log.error("failed to run on_change command: \(error.localizedDescription)")
+      return
+    }
+    running = child
+    if timeout > 0 {
+      let work = DispatchWorkItem { [log, timeout] in
+        MainActor.assumeIsolated {
+          guard child.isRunning else { return }
+          log.error("on_change command exceeded \(timeout)s; killing it")
+          child.terminateGroup(SIGTERM)
+          DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            MainActor.assumeIsolated { child.terminateGroup(SIGKILL) }
+          }
+        }
+      }
+      timeoutWork = work
+      DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: work)
+    }
+  }
+
+  private func finished(_ exit: ChildProcess.Exit) {
+    timeoutWork?.cancel()
+    timeoutWork = nil
+    running = nil
+    switch exit {
+    case .signal(let sig): log.error("on_change command was killed by signal \(sig)")
+    case .status(let code) where code != 0:
+      log.error("on_change command exited with status \(code)")
+    case .status: break
+    }
+    if let next = pending {
+      pending = nil
+      start(next)
+    }
+  }
+}
+
+struct Logger: Sendable {
   let verbose: Bool
   private static let formatter: ISO8601DateFormatter = {
     let f = ISO8601DateFormatter()
@@ -195,6 +287,7 @@ struct Logger {
 
   private func write(_ level: String, _ message: String) {
     let line = "\(Logger.formatter.string(from: Date())) [\(level)] \(message)\n"
+    // A single write(2) per line keeps lines intact even if called from several threads.
     FileHandle.standardError.write(Data(line.utf8))
   }
 }

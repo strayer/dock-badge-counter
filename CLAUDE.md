@@ -20,8 +20,11 @@ swift run dock-badge-counter [--include-empty]          # one-shot
 swift run dock-badge-counter watch --verbose            # watcher, NDJSON to stdout
 swift run dock-badge-counter watch --config examples/sketchybar/config.toml
 
+# Run tests (see note in Architecture about DEVELOPER_DIR)
+swift test
+
 # Format code
-swift format
+swift format --in-place --recursive Sources Tests
 ```
 
 ## Architecture
@@ -33,8 +36,11 @@ Sources/
 │   ├── Read.swift              # one-shot JSON output
 │   └── Watch.swift             # CLI options → WatchConfig → Watcher
 ├── BadgeReader.swift           # AX walk of the Dock; BadgeSnapshot = [String: String]; JSON helper
-├── Config.swift                # WatchConfig (TOML via TOMLKit, Codable, all keys optional)
-└── Watcher.swift               # timer loop, diff, on_change command / NDJSON, sleep-lock pause, Logger
+├── ChildProcess.swift          # posix_spawn'd `/bin/sh -c` child in its own process group, reaped via DispatchSource
+├── Config.swift                # WatchConfig (strict TOML via TOMLKit, Codable, all keys optional, validation)
+├── Delivery.swift              # pure logic: FireReason, Delivery (diff/merge), PauseState, monotonic clock
+└── Watcher.swift               # @MainActor timer loop, permission retry, pause handling, CommandRunner, Logger
+Tests/                          # Swift Testing suites for Delivery/PauseState and WatchConfig/CLI merge
 examples/                       # config.toml with defaults; sketchybar/ (Lua + shell handlers)
 Formula/                        # Homebrew formula incl. `service` block (brew services → `watch`)
 ```
@@ -42,8 +48,12 @@ Formula/                        # Homebrew formula incl. `service` block (brew s
 Key facts:
 
 - The Dock emits **no** accessibility notifications for badge changes; polling is the only option. A full poll is ~1 ms, so `watch` polls on a `DispatchSourceTimer` with 20% leeway and only forwards diffs.
-- `watch` delivers `DOCK_BADGES` (full snapshot), `DOCK_BADGES_CHANGED` (diff, removed = "") and `DOCK_BADGES_REASON` (start|change|heartbeat) to `/bin/sh -c <on_change>`, run on a serial queue so commands never overlap. Without `on_change` it prints NDJSON to stdout.
-- Config precedence: defaults < TOML file (`$XDG_CONFIG_HOME/dock-badge-counter/config.toml`) < CLI flags. TOML integers and floats are both accepted for numeric keys.
+- `watch` delivers `DOCK_BADGES` (full snapshot), `DOCK_BADGES_CHANGED` (diff since last delivery, removed = "") and `DOCK_BADGES_REASON` (start|change|heartbeat) to `/bin/sh -c <on_change>`. `CommandRunner` runs one command at a time and coalesces newer deliveries into a single pending one (`Delivery.merged`); `command_timeout` kills the whole process group (SIGTERM, then SIGKILL after 2 s). Without `on_change` it prints NDJSON to stdout.
+- `BadgeReader.read()` either returns a snapshot built only from successful AX replies or throws; transient AX errors keep the previous snapshot so the Dock restarting never produces false removals. Only `AXApplicationDockItem` items count. `apiDisabled` maps to permission-denied, which drops the watcher back into its 5 s permission-retry loop.
+- Pause handling is a set of reasons (`sleep`, `screenLocked`); polling resumes only when the set is empty. Initial lock state comes from `CGSessionCopyCurrentDictionary()["CGSSessionScreenIsLocked"]`.
+- Config precedence: defaults < TOML file (`$XDG_CONFIG_HOME/dock-badge-counter/config.toml`, relative XDG ignored) < CLI flags (`--no-*` inversions and `--stdout` can override file values). TOML decoding is strict (unknown keys are errors); integers and floats are both accepted for numeric keys. Validation: interval 0.1…86400, heartbeat/command_timeout 0…86400, all finite.
+- Everything in `Watcher`/`CommandRunner`/`ChildProcess` is `@MainActor`; Dispatch and notification callbacks enter it with `MainActor.assumeIsolated`.
+- Tests use Swift Testing. The Command Line Tools toolchain lacks the `TestingMacros` plugin, so run `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` (or `Xcode-beta.app`) when only CLT is selected.
 - Accessibility (TCC) is attributed to the *responsible process*: the terminal for one-shot use, the binary itself under launchd. Grants are tied to the code signature; ad-hoc builds lose the grant on every rebuild.
 - Dependencies: swift-argument-parser, TOMLKit. Everything else is system frameworks (AppKit, ApplicationServices).
 - Exit codes: 0 success, 1 error (incl. config errors), 64 usage errors (ArgumentParser).

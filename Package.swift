@@ -24,6 +24,11 @@ let package = Package(
         .product(name: "TOMLKit", package: "TOMLKit"),
       ],
       path: "Sources"
-    )
+    ),
+    .testTarget(
+      name: "dock-badge-counterTests",
+      dependencies: ["dock-badge-counter"],
+      path: "Tests"
+    ),
   ]
 )

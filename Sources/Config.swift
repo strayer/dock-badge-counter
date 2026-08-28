@@ -2,7 +2,10 @@ import Foundation
 import TOMLKit
 
 /// Settings for `watch`, loaded from a TOML file and overridable from the command line.
-struct WatchConfig: Codable {
+struct WatchConfig: Codable, Equatable {
+  /// Smallest accepted poll period; anything faster is a hot loop against the Dock.
+  static let minimumInterval = 0.1
+
   /// Poll period in seconds.
   var interval: Double = 1.0
   /// Include apps without a badge (as empty strings) in snapshots.
@@ -15,6 +18,8 @@ struct WatchConfig: Codable {
   var pauseOnLock: Bool = true
   /// Command to run via `/bin/sh -c` on every change. When nil, snapshots are written to stdout as NDJSON.
   var onChange: String?
+  /// Kill the `on_change` command if it runs longer than this many seconds (0 disables).
+  var commandTimeout: Double = 30
   /// Log every poll and command run to stderr.
   var verbose: Bool = false
 
@@ -25,6 +30,7 @@ struct WatchConfig: Codable {
     case heartbeat
     case pauseOnLock = "pause_on_lock"
     case onChange = "on_change"
+    case commandTimeout = "command_timeout"
     case verbose
   }
 
@@ -39,40 +45,90 @@ struct WatchConfig: Codable {
     heartbeat = try c.decodeNumber(forKey: .heartbeat) ?? heartbeat
     pauseOnLock = try c.decodeIfPresent(Bool.self, forKey: .pauseOnLock) ?? pauseOnLock
     onChange = try c.decodeIfPresent(String.self, forKey: .onChange) ?? onChange
+    commandTimeout = try c.decodeNumber(forKey: .commandTimeout) ?? commandTimeout
     verbose = try c.decodeIfPresent(Bool.self, forKey: .verbose) ?? verbose
   }
 
   /// `$XDG_CONFIG_HOME/dock-badge-counter/config.toml`, falling back to `~/.config`.
-  static var defaultPath: String {
-    let env = ProcessInfo.processInfo.environment
-    let base =
-      env["XDG_CONFIG_HOME"].flatMap { $0.isEmpty ? nil : $0 }
-      ?? (env["HOME"] ?? NSHomeDirectory()) + "/.config"
-    return base + "/dock-badge-counter/config.toml"
+  /// Per the XDG spec a relative `XDG_CONFIG_HOME` is invalid and ignored.
+  static func defaultPath(environment env: [String: String] = ProcessInfo.processInfo.environment)
+    -> String
+  {
+    let xdg = env["XDG_CONFIG_HOME"].flatMap { $0.hasPrefix("/") ? $0 : nil }
+    let home = env["HOME"].flatMap { $0.hasPrefix("/") ? $0 : nil } ?? NSHomeDirectory()
+    return (xdg ?? home + "/.config") + "/dock-badge-counter/config.toml"
   }
 
   /// Loads the file at `path`. A missing file at the *default* path is not an error; a missing
-  /// explicitly requested file is.
-  static func load(path: String?) throws -> WatchConfig {
-    let resolved = path ?? defaultPath
+  /// explicitly requested file is. Returns the config and a list of non-fatal warnings.
+  static func load(path: String?) throws -> (WatchConfig, warnings: [String]) {
+    let resolved = path ?? defaultPath()
     guard FileManager.default.fileExists(atPath: resolved) else {
-      if path == nil { return WatchConfig() }
+      if path == nil { return (WatchConfig(), []) }
       throw ConfigError.notFound(resolved)
     }
-    let text = try String(contentsOfFile: resolved, encoding: .utf8)
+    let text: String
     do {
-      return try TOMLDecoder().decode(WatchConfig.self, from: text)
+      text = try String(contentsOfFile: resolved, encoding: .utf8)
     } catch {
-      throw ConfigError.invalid(resolved, error)
+      throw ConfigError.unreadable(resolved, error.localizedDescription)
+    }
+    do {
+      return (try parse(text), permissionWarnings(path: resolved))
+    } catch let error as ConfigError {
+      throw error
+    } catch {
+      throw ConfigError.invalid(resolved, describe(error))
     }
   }
 
+  /// Parses TOML text. Unknown keys are rejected so typos don't silently fall back to defaults.
+  static func parse(_ text: String) throws -> WatchConfig {
+    var decoder = TOMLDecoder()
+    decoder.strictDecoding = true
+    return try decoder.decode(WatchConfig.self, from: text)
+  }
+
+  /// The config file is effectively executable code (`on_change` runs in a shell); warn if others can edit it.
+  static func permissionWarnings(path: String) -> [String] {
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+      let mode = attrs[.posixPermissions] as? Int
+    else { return [] }
+    if mode & 0o022 != 0 {
+      return [
+        "config file \(path) is group- or world-writable; its on_change command runs in a shell"
+      ]
+    }
+    return []
+  }
+
   func validate() throws {
-    guard interval > 0 else { throw ConfigError.invalidValue("interval must be > 0") }
-    guard heartbeat >= 0 else { throw ConfigError.invalidValue("heartbeat must be >= 0") }
-    if let cmd = onChange, cmd.trimmingCharacters(in: .whitespaces).isEmpty {
+    guard interval.isFinite, interval >= WatchConfig.minimumInterval, interval <= 86_400 else {
+      throw ConfigError.invalidValue(
+        "interval must be between \(WatchConfig.minimumInterval) and 86400 seconds")
+    }
+    guard heartbeat.isFinite, heartbeat >= 0, heartbeat <= 86_400 else {
+      throw ConfigError.invalidValue("heartbeat must be between 0 and 86400 seconds")
+    }
+    guard commandTimeout.isFinite, commandTimeout >= 0, commandTimeout <= 86_400 else {
+      throw ConfigError.invalidValue("command_timeout must be between 0 and 86400 seconds")
+    }
+    if let cmd = onChange, cmd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
       throw ConfigError.invalidValue("on_change must not be empty")
     }
+  }
+
+  private static func describe(_ error: Error) -> String {
+    if let decoding = error as? DecodingError {
+      switch decoding {
+      case .keyNotFound(let key, _): return "unexpected type for key '\(key.stringValue)'"
+      case .typeMismatch(_, let ctx), .valueNotFound(_, let ctx), .dataCorrupted(let ctx):
+        let path = ctx.codingPath.map(\.stringValue).joined(separator: ".")
+        return path.isEmpty ? ctx.debugDescription : "\(path): \(ctx.debugDescription)"
+      @unknown default: break
+      }
+    }
+    return (error as? LocalizedError)?.errorDescription ?? String(describing: error)
   }
 }
 
@@ -86,17 +142,17 @@ extension KeyedDecodingContainer {
   }
 }
 
-enum ConfigError: Error, LocalizedError {
+enum ConfigError: Error, LocalizedError, Equatable {
   case notFound(String)
-  case invalid(String, Error)
+  case unreadable(String, String)
+  case invalid(String, String)
   case invalidValue(String)
 
   var errorDescription: String? {
     switch self {
     case .notFound(let p): return "Config file not found: \(p)"
-    case .invalid(let p, let e):
-      return
-        "Invalid config file \(p): \((e as? LocalizedError)?.errorDescription ?? String(describing: e))"
+    case .unreadable(let p, let m): return "Cannot read config file \(p): \(m)"
+    case .invalid(let p, let m): return "Invalid config file \(p): \(m)"
     case .invalidValue(let m): return "Invalid configuration: \(m)"
     }
   }
