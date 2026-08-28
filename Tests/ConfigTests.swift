@@ -62,6 +62,28 @@ import Testing
     #expect(throws: ConfigError.self) { try c.validate() }
   }
 
+  @Test(arguments: [
+    ("heartbeat", -1.0), ("heartbeat", 86_401), ("heartbeat", .infinity), ("heartbeat", .nan),
+    ("command_timeout", -0.5), ("command_timeout", 86_401), ("command_timeout", -.infinity),
+    ("command_timeout", .nan),
+  ])
+  func rejectsOutOfRangeNumbers(field: String, value: Double) {
+    var c = WatchConfig()
+    if field == "heartbeat" { c.heartbeat = value } else { c.commandTimeout = value }
+    #expect(throws: ConfigError.self) { try c.validate() }
+  }
+
+  @Test func acceptsBoundaryValues() throws {
+    var c = WatchConfig()
+    c.interval = 86_400
+    c.heartbeat = 86_400
+    c.commandTimeout = 86_400
+    try c.validate()
+    c.heartbeat = 0
+    c.commandTimeout = 0
+    try c.validate()
+  }
+
   @Test func validationBounds() throws {
     var c = WatchConfig()
     c.interval = WatchConfig.minimumInterval
@@ -136,6 +158,45 @@ import Testing
     try "interval = \"fast\"".write(to: file, atomically: true, encoding: .utf8)
     #expect(throws: ConfigError.invalid(file.path, "interval must be a number")) {
       try WatchConfig.load(path: file.path)
+    }
+  }
+
+  /// Every CLI option must override a deliberately non-default file value; every omitted option
+  /// must leave it alone.
+  @Test func eachCLIOptionOverridesOnlyItsField() throws {
+    // File config with every value non-default; each case flips exactly one field from it.
+    var file = WatchConfig()
+    file.interval = 5
+    file.heartbeat = 120
+    file.commandTimeout = 7
+    file.onChange = "file-command"
+    file.includeEmpty = true
+    file.runOnStart = false
+    file.pauseOnLock = false
+    file.verbose = true
+
+    let cases: [(args: [String], apply: (inout WatchConfig) -> Void)] = [
+      (["--interval", "0.5"], { $0.interval = 0.5 }),
+      (["--heartbeat", "9"], { $0.heartbeat = 9 }),
+      (["--command-timeout", "3"], { $0.commandTimeout = 3 }),
+      (["--on-change", "echo hi"], { $0.onChange = "echo hi" }),
+      (["--stdout"], { $0.onChange = nil }),
+      (["--no-include-empty"], { $0.includeEmpty = false }),
+      (["--run-on-start"], { $0.runOnStart = true }),
+      (["--pause-on-lock"], { $0.pauseOnLock = true }),
+      (["--no-verbose"], { $0.verbose = false }),
+      // Same-as-file values are still fine to pass explicitly.
+      (["--include-empty"], { $0.includeEmpty = true }),
+      (["--no-run-on-start"], { $0.runOnStart = false }),
+      (["--no-pause-on-lock"], { $0.pauseOnLock = false }),
+      (["--verbose"], { $0.verbose = true }),
+      ([], { _ in }),
+    ]
+    for c in cases {
+      var expected = file
+      c.apply(&expected)
+      let merged = Watch.merge(file: file, cli: try Watch.parse(c.args))
+      #expect(merged == expected, "args: \(c.args)")
     }
   }
 

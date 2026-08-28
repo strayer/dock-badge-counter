@@ -230,6 +230,9 @@ final class CommandRunner {
   private var timeoutWork: DispatchWorkItem?
   private var pending: Delivery?
 
+  /// True when no command is running and nothing is queued.
+  var isIdle: Bool { running == nil && pending == nil }
+
   init(command: String, timeout: Double, log: Logger) {
     self.command = command
     self.timeout = timeout
