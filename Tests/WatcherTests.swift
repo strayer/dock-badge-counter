@@ -11,7 +11,10 @@ private final class Harness {
   var clock = 1000.0
   var trusted = true
   var deliveries: [Delivery] = []
+  private(set) var permissionChecks = 0
   let watcher: Watcher
+
+  struct UnscriptedRead: Error {}
 
   init(configure: (inout WatchConfig) -> Void = { _ in }) {
     var config = WatchConfig()
@@ -21,13 +24,21 @@ private final class Harness {
       config: config,
       readSnapshot: { try box!.nextRead() },
       now: { box!.clock },
-      isTrusted: { _ in box!.trusted },
+      isTrusted: { _ in
+        box!.permissionChecks += 1
+        return box!.trusted
+      },
       sink: { box!.deliveries.append($0) })
     box = self
   }
 
   private func nextRead() throws -> BadgeSnapshot {
-    precondition(!reads.isEmpty, "test scripted fewer reads than the watcher performed")
+    guard !reads.isEmpty else {
+      // Fail the test rather than crash the whole run. The watcher treats the thrown error as a
+      // transient read failure, so the recorded issue is what makes this visible.
+      Issue.record("the watcher read the Dock although no read was scripted")
+      throw UnscriptedRead()
+    }
     return try reads.removeFirst().get()
   }
 
@@ -201,5 +212,57 @@ private final class Harness {
     h.watcher.handlePause(reason: .sleep, pausing: true, source: "test")
     h.watcher.handlePause(reason: .sleep, pausing: false, source: "test")
     #expect(h.deliveries.isEmpty)
+  }
+
+  @Test func changeWinsOverSimultaneouslyDueHeartbeat() {
+    let h = Harness { $0.heartbeat = 10 }
+    h.poll(["A": "1"])
+    h.clock += 10
+    h.poll(["A": "2"])
+    #expect(h.reasons == [.start, .change])
+    #expect(h.deliveries.last?.changed == ["A": "2"])
+  }
+
+  @Test func transientErrorsDoNotResetHeartbeatBaseline() {
+    let h = Harness { $0.heartbeat = 10 }
+    h.poll(["A": "1"])  // t = 1000
+    h.clock += 6
+    h.poll(failing: .accessibilityError(.cannotComplete))
+    h.clock += 6  // t = 1012: deadline passed during the outage
+    h.poll(["A": "1"])
+    #expect(h.reasons == [.start, .heartbeat])
+  }
+
+  @Test func regainingPermissionWhilePausedDoesNotRead() {
+    let h = Harness()
+    h.trusted = false
+    h.watcher.tick()
+    #expect(!h.watcher.trusted)
+    h.watcher.handlePause(reason: .sleep, pausing: true, source: "test")
+    h.trusted = true
+    h.watcher.tick()
+    #expect(h.watcher.trusted)
+    #expect(h.deliveries.isEmpty)  // no read was scripted; an attempt would record an issue
+  }
+
+  @Test func resumeForInactiveReasonDoesNotPoll() {
+    let h = Harness()
+    h.poll(["A": "1"])
+    h.watcher.handlePause(reason: .screenLocked, pausing: false, source: "test")
+    h.watcher.handlePause(reason: .sleep, pausing: false, source: "test")
+    #expect(h.reasons == [.start])
+  }
+
+  @Test func trustedTickPollsWithoutRecheckingPermission() {
+    let h = Harness()
+    h.reads.append(.success(["A": "1"]))
+    h.watcher.tick()  // untrusted -> trusted: one permission check
+    #expect(h.permissionChecks == 1)
+    h.reads.append(.success(["A": "1"]))
+    h.watcher.tick()
+    h.reads.append(.success(["A": "1"]))
+    h.watcher.tick()
+    #expect(h.permissionChecks == 1)
+    #expect(h.reads.isEmpty)
   }
 }

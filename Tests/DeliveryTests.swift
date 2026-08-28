@@ -29,15 +29,19 @@ import Testing
     #expect(merged.reason == .change)
   }
 
-  @Test func mergeChangeOutranksHeartbeatAndStart() {
-    let start = Delivery(snapshot: ["A": "1"], changed: ["A": "1"], reason: .start)
-    let heartbeat = Delivery(snapshot: ["A": "1"], changed: [:], reason: .heartbeat)
-    let change = Delivery(snapshot: ["A": "2"], changed: ["A": "2"], reason: .change)
-    #expect(start.merged(with: heartbeat).reason == .start)
-    #expect(heartbeat.merged(with: start).reason == .start)
-    #expect(heartbeat.merged(with: change).reason == .change)
-    #expect(change.merged(with: heartbeat).reason == .change)
-    #expect(heartbeat.merged(with: heartbeat).reason == .heartbeat)
+  /// change > start > heartbeat, in both merge directions.
+  @Test(arguments: [
+    (FireReason.change, FireReason.change, FireReason.change),
+    (.change, .start, .change), (.start, .change, .change),
+    (.change, .heartbeat, .change), (.heartbeat, .change, .change),
+    (.start, .start, .start),
+    (.start, .heartbeat, .start), (.heartbeat, .start, .start),
+    (.heartbeat, .heartbeat, .heartbeat),
+  ])
+  func mergeReasonPriority(older: FireReason, newer: FireReason, expected: FireReason) {
+    let a = Delivery(snapshot: ["A": "1"], changed: [:], reason: older)
+    let b = Delivery(snapshot: ["A": "1"], changed: [:], reason: newer)
+    #expect(a.merged(with: b).reason == expected)
   }
 
   @Test func mergeCarriesFinalValueForAppChangedTwice() {
@@ -67,5 +71,13 @@ import Testing
     #expect(!state.isPaused)
     let repeated = state.remove(.screenLocked)
     #expect(!repeated)  // idempotent
+  }
+
+  @Test func jsonIsSortedCompactAndUnescaped() throws {
+    // The wire format consumers script against: deterministic key order, no escaped slashes,
+    // non-ASCII badge glyphs and "99+" verbatim.
+    let json = try JSON.encode(["Zen": "•", "App/Two": "99+", "Mail": "3"])
+    #expect(json == #"{"App/Two":"99+","Mail":"3","Zen":"•"}"#)
+    #expect(try JSON.encode([:]) == "{}")
   }
 }
