@@ -1,0 +1,38 @@
+# dock-badge-counter watch configuration
+# Location: $XDG_CONFIG_HOME/dock-badge-counter/config.toml (default ~/.config/dock-badge-counter/config.toml)
+# Every key is optional; the values below are the defaults unless noted. Unknown keys are rejected.
+#
+# Note: `on_change` is executed in a shell, so treat this file like a script — keep it writable
+# only by you (the watcher warns if it is group- or world-writable).
+
+# Poll period in seconds (minimum 0.1). One poll is about a millisecond; 1 s is a good default.
+interval = 1.0
+
+# Include applications without a badge (as "") in the snapshot.
+include_empty = false
+
+# Run the command once with the initial snapshot right after startup.
+run_on_start = true
+
+# Re-run the command every N seconds even if nothing changed (0 = off).
+# Useful as a safety net when the consumer may restart and lose state.
+heartbeat = 0
+
+# Skip polling while the machine sleeps or the screen is locked.
+pause_on_lock = true
+
+# Command to run via `/bin/sh -c` whenever badges change. It receives:
+#   DOCK_BADGES          full snapshot, e.g. {"Slack":"12","Mail":"3"}
+#   DOCK_BADGES_CHANGED  only the apps that changed since the last delivery; removed badges have value ""
+#   DOCK_BADGES_REASON   start | change | heartbeat
+# Commands never overlap: if one is still running when the next change arrives, deliveries are
+# coalesced and sent once it finishes.
+# If unset, snapshots are printed to stdout as JSON lines instead.
+# Example (SketchyBar, see examples/sketchybar/):
+# on_change = 'sketchybar --trigger dock_badges BADGES="$DOCK_BADGES"'
+
+# Kill the command (and anything it spawned) if it runs longer than N seconds (0 = never).
+command_timeout = 30
+
+# Log every poll to stderr.
+verbose = false

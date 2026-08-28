@@ -1,0 +1,6 @@
+# ~/.config/dock-badge-counter/config.toml
+interval = 1.0
+# Re-send the full state once a minute so a restarted/reloaded SketchyBar picks it up again.
+# Set to 0 if you only want events on actual changes.
+heartbeat = 60
+on_change = 'sketchybar --trigger dock_badges BADGES="$DOCK_BADGES"'

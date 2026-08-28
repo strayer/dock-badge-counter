@@ -32,9 +32,19 @@ jobs:
           fi
           VERSION="${TAG_NAME#v}"
           
-          # Calculate SHA256 of the release tarball
-          TARBALL_URL="https://github.com/${{ github.repository }}/archive/${TAG_NAME}.tar.gz"
-          SHA256=$(curl -sL "$TARBALL_URL" | shasum -a 256 | cut -d' ' -f1)
+          # Download the release tarball (fail loudly on 404 etc.) and verify it is what the
+          # formula expects before hashing it.
+          TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG_NAME}.tar.gz"
+          curl --fail --silent --location --output release.tar.gz "$TARBALL_URL"
+          SHA256=$(shasum -a 256 release.tar.gz | cut -d' ' -f1)
+
+          tar -xzf release.tar.gz
+          SRC_DIR=$(tar -tzf release.tar.gz | head -1 | cut -d/ -f1)
+          test -f "$SRC_DIR/examples/config.toml" || { echo "examples/config.toml missing from tarball"; exit 1; }
+          if ! grep -q "let version = \"$VERSION\"" "$SRC_DIR/Sources/Commands/DockBadgeCounter.swift"; then
+            echo "Sources/Commands/DockBadgeCounter.swift does not declare version $VERSION"; exit 1
+          fi
+          rm -rf release.tar.gz "$SRC_DIR"
           
           echo "Updating formula for version: $VERSION"
           echo "Tarball URL: $TARBALL_URL"

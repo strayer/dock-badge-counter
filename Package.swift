@@ -1,6 +1,4 @@
-// swift-tools-version: 6.1
-// The swift-tools-version declares the minimum version of Swift required to build this package.
-
+// swift-tools-version: 5.9
 import PackageDescription
 
 let package = Package(
@@ -14,17 +12,23 @@ let package = Package(
       targets: ["dock-badge-counter"]
     )
   ],
+  dependencies: [
+    .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
+    .package(url: "https://github.com/LebJe/TOMLKit.git", from: "0.6.0"),
+  ],
   targets: [
     .executableTarget(
       name: "dock-badge-counter",
-      path: "Sources",
-      swiftSettings: [
-        .unsafeFlags(
-          [
-            "-O",
-            "-whole-module-optimization",
-          ], .when(configuration: .release))
-      ]
-    )
+      dependencies: [
+        .product(name: "ArgumentParser", package: "swift-argument-parser"),
+        .product(name: "TOMLKit", package: "TOMLKit"),
+      ],
+      path: "Sources"
+    ),
+    .testTarget(
+      name: "dock-badge-counterTests",
+      dependencies: ["dock-badge-counter"],
+      path: "Tests"
+    ),
   ]
 )
