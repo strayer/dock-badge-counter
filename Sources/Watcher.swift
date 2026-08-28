@@ -6,35 +6,75 @@ import Foundation
 /// (with `DOCK_BADGES*` environment variables) or as NDJSON on stdout.
 ///
 /// All mutable state lives on the main actor; Dispatch/notification callbacks hop onto it.
+///
+/// The OS-facing pieces (reading the Dock, the clock, the permission check, the delivery target)
+/// are injectable so the polling state machine can be driven directly in tests without a timer.
 @MainActor
 final class Watcher {
-  private static let permissionRetryInterval = 5.0
+  static let permissionRetryInterval = 5.0
 
   private let config: WatchConfig
-  private let reader: BadgeReader
   private let log: Logger
-  private let runner: CommandRunner?
+  private let readSnapshot: () throws -> BadgeSnapshot
+  private let now: () -> Double
+  private let isTrusted: (_ prompt: Bool) -> Bool
+  private let sink: (Delivery) -> Void
   private var timer: DispatchSourceTimer?
   private var signalSources: [DispatchSourceSignal] = []
   private var previous: BadgeSnapshot?
   private var lastFire: Double?
-  private var pause = PauseState()
-  private var trusted = false
+  private(set) var pause = PauseState()
+  private(set) var trusted = false
+  private(set) var currentInterval: Double?
+  /// Called before exiting on SIGTERM/SIGINT (production: terminate a running command).
+  var shutdownHook: (() -> Void)?
 
-  init(config: WatchConfig) {
-    self.config = config
-    self.reader = BadgeReader(includeEmpty: config.includeEmpty)
-    self.log = Logger(verbose: config.verbose)
-    self.runner = config.onChange.map {
-      CommandRunner(
-        command: $0, timeout: config.commandTimeout, log: Logger(verbose: config.verbose))
+  /// Production wiring: AX reader, monotonic clock, real permission check, command runner or stdout.
+  convenience init(config: WatchConfig) {
+    let reader = BadgeReader(includeEmpty: config.includeEmpty)
+    let log = Logger(verbose: config.verbose)
+    let runner = config.onChange.map {
+      CommandRunner(command: $0, timeout: config.commandTimeout, log: log)
     }
+    self.init(
+      config: config,
+      readSnapshot: { try reader.read() },
+      now: monotonicNow,
+      isTrusted: BadgeReader.isTrusted(prompt:),
+      sink: { delivery in
+        if let runner {
+          runner.submit(delivery)
+          return
+        }
+        do {
+          print(try JSON.encode(delivery.snapshot))
+          fflush(stdout)
+        } catch {
+          log.error(error.localizedDescription)
+        }
+      })
+    shutdownHook = { runner?.shutdown() }
+  }
+
+  init(
+    config: WatchConfig,
+    readSnapshot: @escaping () throws -> BadgeSnapshot,
+    now: @escaping () -> Double,
+    isTrusted: @escaping (_ prompt: Bool) -> Bool,
+    sink: @escaping (Delivery) -> Void
+  ) {
+    self.config = config
+    self.log = Logger(verbose: config.verbose)
+    self.readSnapshot = readSnapshot
+    self.now = now
+    self.isTrusted = isTrusted
+    self.sink = sink
   }
 
   /// Blocks forever; the process is expected to be terminated by launchd / a signal.
   func run() -> Never {
     log.info(
-      "starting: interval=\(config.interval)s heartbeat=\(config.heartbeat)s pause_on_lock=\(config.pauseOnLock) mode=\(runner == nil ? "stdout" : "command")"
+      "starting: interval=\(config.interval)s heartbeat=\(config.heartbeat)s pause_on_lock=\(config.pauseOnLock) mode=\(config.onChange == nil ? "stdout" : "command")"
     )
     installSignalHandlers()
     if config.pauseOnLock {
@@ -45,7 +85,7 @@ final class Watcher {
       }
     }
 
-    trusted = BadgeReader.isTrusted(prompt: true)
+    trusted = isTrusted(true)
     if !trusted {
       log.error(
         "accessibility permission not granted; waiting (grant it in System Settings > Privacy & Security > Accessibility)"
@@ -63,13 +103,15 @@ final class Watcher {
   }
 
   private func schedule(interval: Double) {
+    currentInterval = interval
     let leeway = DispatchTimeInterval.milliseconds(max(1, Int((interval * 200).rounded())))
     timer?.schedule(deadline: .now(), repeating: interval, leeway: leeway)
   }
 
-  private func tick() {
+  /// One timer tick: (re)check the permission if needed, then poll unless paused.
+  func tick() {
     if !trusted {
-      guard BadgeReader.isTrusted(prompt: false) else { return }
+      guard isTrusted(false) else { return }
       trusted = true
       log.info("accessibility permission granted")
       schedule(interval: config.interval)
@@ -78,10 +120,11 @@ final class Watcher {
     poll()
   }
 
-  private func poll() {
+  /// Reads the Dock once and delivers `start`/`change`/`heartbeat` as appropriate.
+  func poll() {
     let snapshot: BadgeSnapshot
     do {
-      snapshot = try reader.read()
+      snapshot = try readSnapshot()
     } catch DockBadgeError.accessibilityPermissionDenied {
       // Revoked after start: fall back to the slow retry loop, keep the last snapshot.
       trusted = false
@@ -95,7 +138,7 @@ final class Watcher {
     }
     log.debug("poll: \(snapshot.count) badge(s)")
 
-    let now = monotonicNow()
+    let now = self.now()
     guard let previous else {
       self.previous = snapshot
       lastFire = now
@@ -119,16 +162,7 @@ final class Watcher {
   private func deliver(_ delivery: Delivery) {
     let changedJSON = (try? JSON.encode(delivery.changed)) ?? "{}"
     log.info("\(delivery.reason.rawValue): \(changedJSON)")
-    if let runner {
-      runner.submit(delivery)
-      return
-    }
-    do {
-      print(try JSON.encode(delivery.snapshot))
-      fflush(stdout)
-    } catch {
-      log.error(error.localizedDescription)
-    }
+    sink(delivery)
   }
 
   // MARK: - Pause on sleep / lock
@@ -156,7 +190,8 @@ final class Watcher {
     }
   }
 
-  private func handlePause(reason: PauseReason, pausing: Bool, source: String) {
+  /// Applies a sleep/lock transition; resuming from a pause polls immediately.
+  func handlePause(reason: PauseReason, pausing: Bool, source: String) {
     if pausing {
       if pause.add(reason) { log.debug("paused (\(source))") }
     } else if pause.remove(reason) {
@@ -174,7 +209,7 @@ final class Watcher {
       source.setEventHandler {
         MainActor.assumeIsolated {
           self.log.info("exiting on signal \(sig)")
-          self.runner?.shutdown()
+          self.shutdownHook?()
           exit(0)
         }
       }

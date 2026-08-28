@@ -40,7 +40,8 @@ Sources/
 ├── Config.swift                # WatchConfig (strict TOML via TOMLKit, Codable, all keys optional, validation)
 ├── Delivery.swift              # pure logic: FireReason, Delivery (diff/merge), PauseState, monotonic clock
 └── Watcher.swift               # @MainActor timer loop, permission retry, pause handling, CommandRunner, Logger
-Tests/                          # Swift Testing suites for Delivery/PauseState and WatchConfig/CLI merge
+Tests/                          # Swift Testing: Delivery/PauseState, WatchConfig/CLI merge, ChildProcess,
+                                #   CommandRunner (real processes), Watcher state machine (injected seams)
 examples/                       # config.toml with defaults; sketchybar/ (Lua + shell handlers)
 Formula/                        # Homebrew formula incl. `service` block (brew services → `watch`)
 ```
@@ -53,6 +54,7 @@ Key facts:
 - Pause handling is a set of reasons (`sleep`, `screenLocked`); polling resumes only when the set is empty. Initial lock state comes from `CGSessionCopyCurrentDictionary()["CGSSessionScreenIsLocked"]`.
 - Config precedence: defaults < TOML file (`$XDG_CONFIG_HOME/dock-badge-counter/config.toml`, relative XDG ignored) < CLI flags (`--no-*` inversions and `--stdout` can override file values). TOML decoding is strict (unknown keys are errors); integers and floats are both accepted for numeric keys. Validation: interval 0.1…86400, heartbeat/command_timeout 0…86400, all finite.
 - Everything in `Watcher`/`CommandRunner`/`ChildProcess` is `@MainActor`; Dispatch and notification callbacks enter it with `MainActor.assumeIsolated`.
+- `Watcher` has two initializers: `init(config:)` wires the real AX reader, monotonic clock, permission check and runner/stdout sink; the designated `init(config:readSnapshot:now:isTrusted:sink:)` is what tests use to drive `tick()`/`poll()`/`handlePause` directly with scripted reads and a manual clock. Keep OS glue (timer, run loop, signal sources, notification observers, `CGSession`) out of the tested path; it is verified manually.
 - Tests use Swift Testing. The Command Line Tools toolchain lacks the `TestingMacros` plugin, so run `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` (or `Xcode-beta.app`) when only CLT is selected.
 - Accessibility (TCC) is attributed to the *responsible process*: the terminal for one-shot use, the binary itself under launchd. Grants are tied to the code signature; ad-hoc builds lose the grant on every rebuild.
 - Dependencies: swift-argument-parser, TOMLKit. Everything else is system frameworks (AppKit, ApplicationServices).
