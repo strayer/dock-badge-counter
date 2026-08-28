@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  TAP_REPO: strayer/homebrew-tap
+  FORMULA: Formula/dock-badge-counter.rb
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify signed tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME")
+          if [ "$(jq -r '.object.type' <<<"$ref")" != "tag" ]; then
+            echo "::error::$GITHUB_REF_NAME is a lightweight tag; only signed annotated tags may be released"
+            exit 1
+          fi
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$(jq -r '.object.sha' <<<"$ref")")
+          if [ "$(jq -r '.verification.verified' <<<"$tag")" != "true" ]; then
+            echo "::error::tag $GITHUB_REF_NAME signature not verified (reason: $(jq -r '.verification.reason' <<<"$tag"))"
+            exit 1
+          fi
+          # Bind the signed tag object to this ref and build: the signed-in name
+          # must match the pushed ref, and the tag must point at the exact commit
+          # being built. Prevents replaying an old signed tag under a new name.
+          if [ "$(jq -r '.tag' <<<"$tag")" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::signed tag name '$(jq -r '.tag' <<<"$tag")' does not match pushed ref $GITHUB_REF_NAME"
+            exit 1
+          fi
+          if [ "$(jq -r '.object.type' <<<"$tag")" != "commit" ] || [ "$(jq -r '.object.sha' <<<"$tag")" != "$GITHUB_SHA" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not point at the commit being built ($GITHUB_SHA)"
+            exit 1
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Verify the source declares this version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! grep -q "let version = \"$version\"" Sources/Commands/DockBadgeCounter.swift; then
+            echo "::error::Sources/Commands/DockBadgeCounter.swift does not declare version $version"
+            exit 1
+          fi
+          test -f examples/config.toml || { echo "::error::examples/config.toml missing"; exit 1; }
+
+      - name: Hash the release tarball
+        id: tarball
+        run: |
+          url="https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$GITHUB_REF_NAME.tar.gz"
+          curl --fail --silent --location --output release.tar.gz "$url"
+          # The tarball must contain the commit being built, not a cached older archive.
+          top=$(tar -tzf release.tar.gz | head -1 | cut -d/ -f1)
+          test "$top" = "dock-badge-counter-${GITHUB_REF_NAME#v}" || { echo "::error::unexpected tarball layout ($top)"; exit 1; }
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum release.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+
+      - name: Check out the tap
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ env.TAP_REPO }}
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: tap
+
+      - name: Bump the formula
+        working-directory: tap
+        env:
+          URL: ${{ steps.tarball.outputs.url }}
+          SHA256: ${{ steps.tarball.outputs.sha256 }}
+        run: |
+          sed -i "s|^  url \".*\"|  url \"$URL\"|" "$FORMULA"
+          sed -i "s|^  sha256 \".*\"|  sha256 \"$SHA256\"|" "$FORMULA"
+          grep -q "$URL" "$FORMULA" && grep -q "$SHA256" "$FORMULA" || { echo "::error::formula update failed"; exit 1; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$FORMULA"
+          git commit -m "dock-badge-counter $GITHUB_REF_NAME"
+          git push
