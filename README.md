@@ -112,12 +112,22 @@ The Dock does not send accessibility notifications when a badge changes, so watc
 
 ## Development
 
+This project uses [prek](https://github.com/j178/prek) for pre-commit hooks.
+
 ```bash
+prek install        # installs pre-commit hooks
 swift build
-swift test          # needs a full Xcode toolchain for the Swift Testing macros; with only the
-                    # Command Line Tools installed, point DEVELOPER_DIR at an Xcode.app
+./scripts/test.sh   # `swift test`; picks an installed Xcode.app automatically when only the
+                    # Command Line Tools are selected (Swift Testing needs its macro plugin)
 swift format --in-place --recursive Sources Tests
 ```
+
+Pre-commit hooks run automatically on `git commit`:
+- **swift format** — auto-formats staged Swift files
+- **swift format lint** — fails on remaining lint findings (no auto-fix)
+- **swift test** — runs the test suite
+
+CI (`.github/workflows/ci.yaml`) runs the same format lint, a release build and the tests on macOS. Renovate keeps Swift packages and GitHub Actions up to date.
 
 ## License
 

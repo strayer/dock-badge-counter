@@ -20,12 +20,24 @@ swift run dock-badge-counter [--include-empty]          # one-shot
 swift run dock-badge-counter watch --verbose            # watcher, NDJSON to stdout
 swift run dock-badge-counter watch --config examples/sketchybar/config.toml
 
-# Run tests (see note in Architecture about DEVELOPER_DIR)
-swift test
+# Run tests (wrapper around `swift test`, see note in Architecture about DEVELOPER_DIR)
+./scripts/test.sh
 
 # Format code
 swift format --in-place --recursive Sources Tests
 ```
+
+## Pre-commit hooks and CI
+
+This project uses [prek](https://github.com/j178/prek) to run pre-commit hooks. Hooks are defined in `.pre-commit-config.yaml` as `repo: local` system hooks:
+
+1. **swift format** — auto-formats staged `.swift` files in-place. May modify files during commit.
+2. **swift format lint** — `swift format lint --strict`; fails the commit on any lint finding.
+3. **swift test** — runs `./scripts/test.sh`. Fails the commit on test failures.
+
+If a commit fails due to reformatting, re-stage the changes and commit again.
+
+`.github/workflows/ci.yaml` runs format lint, `swift build -c release` and `swift test` on `macos-latest` for every PR and push to `main`. `renovate.json5` groups Swift package and GitHub Actions updates (action digests are pinned).
 
 ## Architecture
 
@@ -55,7 +67,7 @@ Key facts:
 - Config precedence: defaults < TOML file (`$XDG_CONFIG_HOME/dock-badge-counter/config.toml`, relative XDG ignored) < CLI flags (`--no-*` inversions and `--stdout` can override file values). TOML decoding is strict (unknown keys are errors); integers and floats are both accepted for numeric keys. Validation: interval 0.1…86400, heartbeat/command_timeout 0…86400, all finite.
 - Everything in `Watcher`/`CommandRunner`/`ChildProcess` is `@MainActor`; Dispatch and notification callbacks enter it with `MainActor.assumeIsolated`.
 - `Watcher` has two initializers: `init(config:)` wires the real AX reader, monotonic clock, permission check and runner/stdout sink; the designated `init(config:readSnapshot:now:isTrusted:sink:)` is what tests use to drive `tick()`/`poll()`/`handlePause` directly with scripted reads and a manual clock. Keep OS glue (timer, run loop, signal sources, notification observers, `CGSession`) out of the tested path; it is verified manually.
-- Tests use Swift Testing. The Command Line Tools toolchain lacks the `TestingMacros` plugin, so run `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` (or `Xcode-beta.app`) when only CLT is selected.
+- Tests use Swift Testing. The Command Line Tools toolchain lacks the `TestingMacros` plugin, so `swift test` fails when only CLT is selected; `./scripts/test.sh` sets `DEVELOPER_DIR` to an installed `Xcode.app`/`Xcode-beta.app` automatically.
 - Accessibility (TCC) is attributed to the *responsible process*: the terminal for one-shot use, the binary itself under launchd. Grants are tied to the code signature; ad-hoc builds lose the grant on every rebuild.
 - Dependencies: swift-argument-parser, TOMLKit. Everything else is system frameworks (AppKit, ApplicationServices).
 - Exit codes: 0 success, 1 error (incl. config errors), 64 usage errors (ArgumentParser).
