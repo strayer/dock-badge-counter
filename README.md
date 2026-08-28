@@ -17,7 +17,7 @@ $ dock-badge-counter
 ## Installation
 
 ```bash
-brew install strayer/dock-badge-counter/dock-badge-counter
+brew install strayer/tap/dock-badge-counter
 ```
 
 Or build from source (requires Xcode 15+):

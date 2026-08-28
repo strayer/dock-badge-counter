@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify signed tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME")
+          if [ "$(jq -r '.object.type' <<<"$ref")" != "tag" ]; then
+            echo "::error::$GITHUB_REF_NAME is a lightweight tag; only signed annotated tags may be released"
+            exit 1
+          fi
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$(jq -r '.object.sha' <<<"$ref")")
+          if [ "$(jq -r '.verification.verified' <<<"$tag")" != "true" ]; then
+            echo "::error::tag $GITHUB_REF_NAME signature not verified (reason: $(jq -r '.verification.reason' <<<"$tag"))"
+            exit 1
+          fi
+          # Bind the signed tag object to this ref and build: the signed-in name
+          # must match the pushed ref, and the tag must point at the exact commit
+          # being built. Prevents replaying an old signed tag under a new name.
+          if [ "$(jq -r '.tag' <<<"$tag")" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::signed tag name '$(jq -r '.tag' <<<"$tag")' does not match pushed ref $GITHUB_REF_NAME"
+            exit 1
+          fi
+          if [ "$(jq -r '.object.type' <<<"$tag")" != "commit" ] || [ "$(jq -r '.object.sha' <<<"$tag")" != "$GITHUB_SHA" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not point at the commit being built ($GITHUB_SHA)"
+            exit 1
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Verify the source declares this version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! grep -q "let version = \"$version\"" Sources/Commands/DockBadgeCounter.swift; then
+            echo "::error::Sources/Commands/DockBadgeCounter.swift does not declare version $version"
+            exit 1
+          fi
+          test -f examples/config.toml || { echo "::error::examples/config.toml missing"; exit 1; }
+
+      # The Homebrew formula in strayer/homebrew-tap is bumped by Renovate's homebrew manager
+      # (github-tags datasource), which downloads this tag's tarball and rewrites url + sha256.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
