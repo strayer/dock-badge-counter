@@ -1,0 +1,11 @@
+[tasks.test]
+description = "Run the test suite (picks an Xcode for DEVELOPER_DIR when only the CLT is selected)"
+run = "scripts/test.sh"
+
+[tasks.format]
+description = "Format Swift sources"
+run = "swift format --in-place --recursive Sources Tests"
+
+[tasks.release]
+description = "Tag the next release (version computed from merged PR labels) and push"
+run = "scripts/release.sh"

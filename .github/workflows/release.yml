@@ -48,8 +48,8 @@ jobs:
           fi
           test -f examples/config.toml || { echo "::error::examples/config.toml missing"; exit 1; }
 
-      # The Homebrew formula in strayer/homebrew-tap is bumped by Renovate's homebrew manager
-      # (github-tags datasource), which downloads this tag's tarball and rewrites url + sha256.
+      # Nothing to build: the formula in strayer/homebrew-tap builds from this tag's tarball and is
+      # bumped by Renovate's homebrew manager (github-tags datasource, url + sha256).
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}

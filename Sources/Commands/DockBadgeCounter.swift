@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 
+// Bumped by scripts/release.sh; must match the release tag (release.yml verifies it).
 let version = "2.0.0"
 
 @main
