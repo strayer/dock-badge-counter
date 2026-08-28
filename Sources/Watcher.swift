@@ -257,8 +257,7 @@ final class CommandRunner {
     running.terminateGroup(SIGTERM)
     let deadline = monotonicNow() + graceSeconds
     while monotonicNow() < deadline {
-      var status: Int32 = 0
-      if waitpid(running.pid, &status, WNOHANG) != 0 { return }
+      if running.reapIfExited() { return }
       usleep(20_000)
     }
     running.terminateGroup(SIGKILL)
