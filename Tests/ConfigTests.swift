@@ -120,6 +120,23 @@ import Testing
     let file = dir.appendingPathComponent("config.toml")
     try "interval = = 1".write(to: file, atomically: true, encoding: .utf8)
     #expect(throws: ConfigError.self) { try WatchConfig.load(path: file.path) }
+    do {
+      _ = try WatchConfig.load(path: file.path)
+      Issue.record("expected a parse error")
+    } catch let error as ConfigError {
+      guard case .invalid(let path, _) = error else {
+        Issue.record("expected .invalid, got \(error)")
+        return
+      }
+      #expect(path == file.path)
+      #expect(error.errorDescription?.contains(file.path) == true)
+    }
+
+    // A wrong numeric type is reported the same way, with the path attached.
+    try "interval = \"fast\"".write(to: file, atomically: true, encoding: .utf8)
+    #expect(throws: ConfigError.invalid(file.path, "interval must be a number")) {
+      try WatchConfig.load(path: file.path)
+    }
   }
 
   @Test func cliOverridesFile() throws {

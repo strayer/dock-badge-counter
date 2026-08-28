@@ -101,6 +101,23 @@ private func lines(of file: URL) -> [String] {
     #expect(await waitUntil { pids(inGroup: child.pid).isEmpty }, "grandchild sleep must be gone")
   }
 
+  @Test func exitCallbackNeverFiresDuringInit() async throws {
+    // Regression: a synchronous onExit from init let CommandRunner overwrite `running` with an
+    // already-reaped child and coalesce every later delivery forever.
+    for _ in 0..<30 {
+      var initReturned = false
+      var firedDuringInit = false
+      let box = ExitBox()
+      _ = try ChildProcess(shellCommand: "exit 0", environment: [:]) { exit in
+        if !initReturned { firedDuringInit = true }
+        box.resolve(exit)
+      }
+      initReturned = true
+      #expect(await box.wait() == .status(0))
+      #expect(!firedDuringInit)
+    }
+  }
+
   @Test func terminateAfterExitIsHarmless() async throws {
     let (child, box) = try spawn("exit 0")
     #expect(await box.wait() == .status(0))
@@ -184,6 +201,33 @@ private func lines(of file: URL) -> [String] {
     #expect(await waitUntil { ProcessListing.contains(commandPrefix: "sleep 100") })
     r.shutdown()
     #expect(await waitUntil { !ProcessListing.contains(commandPrefix: "sleep 100") })
+  }
+
+  @Test func shutdownForceKillsTrappingCommandAndDropsPending() async throws {
+    let out = tempFile()
+    defer { try? FileManager.default.removeItem(at: out) }
+    let r = runner(#"trap "" TERM; echo "$DOCK_BADGES_REASON" >> "\#(out.path)"; sleep 100"#)
+    r.submit(Delivery(snapshot: [:], changed: [:], reason: .start))
+    r.submit(Delivery(snapshot: ["A": "1"], changed: ["A": "1"], reason: .change))  // pending
+    #expect(await waitUntil { lines(of: out) == ["start"] })
+    #expect(await waitUntil { ProcessListing.contains(commandPrefix: "sleep 100") })
+
+    r.shutdown(graceSeconds: 0.3)  // blocks ≤ 0.3 s, then SIGKILL
+    #expect(await waitUntil { !ProcessListing.contains(commandPrefix: "sleep 100") })
+    // The pending delivery must not start after shutdown.
+    try await Task.sleep(nanoseconds: 300_000_000)
+    #expect(lines(of: out) == ["start"])
+  }
+
+  @Test func secondDeliveryRunsAfterInstantCommand() async throws {
+    // Companion to exitCallbackNeverFiresDuringInit at the CommandRunner level.
+    let out = tempFile()
+    defer { try? FileManager.default.removeItem(at: out) }
+    let r = runner(#"echo "$DOCK_BADGES_REASON" >> "\#(out.path)""#)
+    for i in 0..<10 {
+      r.submit(Delivery(snapshot: ["A": "\(i)"], changed: ["A": "\(i)"], reason: .change))
+      #expect(await waitUntil { lines(of: out).count == i + 1 })
+    }
   }
 }
 

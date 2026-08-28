@@ -245,9 +245,20 @@ final class CommandRunner {
     start(delivery)
   }
 
-  /// Terminates a running command and everything it spawned; used on shutdown.
-  func shutdown() {
-    running?.terminateGroup(SIGTERM)
+  /// Terminates a running command and everything it spawned; used right before the process exits.
+  /// SIGTERM first, then SIGKILL after a short grace period so a TERM-trapping command cannot be
+  /// orphaned. Blocks for at most `graceSeconds`.
+  func shutdown(graceSeconds: Double = 1.0) {
+    pending = nil
+    guard let running, running.isRunning else { return }
+    running.terminateGroup(SIGTERM)
+    let deadline = monotonicNow() + graceSeconds
+    while monotonicNow() < deadline {
+      var status: Int32 = 0
+      if waitpid(running.pid, &status, WNOHANG) != 0 { return }
+      usleep(20_000)
+    }
+    running.terminateGroup(SIGKILL)
   }
 
   private func start(_ delivery: Delivery) {

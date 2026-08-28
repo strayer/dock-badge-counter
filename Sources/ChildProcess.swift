@@ -64,8 +64,10 @@ final class ChildProcess {
     source.setEventHandler { MainActor.assumeIsolated { self.reap(block: true) } }
     source.resume()
     self.source = source
-    // The child may already have exited before the source was registered; check once without blocking.
-    reap(block: false)
+    // The child may already have exited before the source was registered; check once without
+    // blocking. Deferred to the next main-queue turn so `onExit` never fires inside `init` —
+    // callers must be able to store the handle before the callback runs.
+    DispatchQueue.main.async { MainActor.assumeIsolated { self.reap(block: false) } }
   }
 
   var isRunning: Bool { !reaped }

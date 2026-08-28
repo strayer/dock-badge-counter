@@ -76,6 +76,8 @@ struct WatchConfig: Codable, Equatable {
     do {
       return (try parse(text), permissionWarnings(path: resolved))
     } catch let error as ConfigError {
+      // Type errors from decodeNumber arrive as .invalidValue; attach the file path like any other parse error.
+      if case .invalidValue(let message) = error { throw ConfigError.invalid(resolved, message) }
       throw error
     } catch {
       throw ConfigError.invalid(resolved, describe(error))
