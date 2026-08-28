@@ -49,8 +49,8 @@ final class ChildProcess {
     let envp: [UnsafeMutablePointer<CChar>?] =
       environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
     defer {
-      argv.forEach { free($0) }
-      envp.forEach { free($0) }
+      for p in argv { free(p) }
+      for p in envp { free(p) }
     }
 
     var pid: pid_t = 0

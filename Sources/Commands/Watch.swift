@@ -64,7 +64,7 @@ struct Watch: ParsableCommand {
     let settings = Watch.merge(file: fileConfig, cli: self)
     try settings.validate()
     let log = Logger(verbose: settings.verbose)
-    warnings.forEach { log.error("warning: \($0)") }
+    for warning in warnings { log.error("warning: \(warning)") }
     // ArgumentParser runs commands on the main thread; hop onto the main actor explicitly.
     MainActor.assumeIsolated { Watcher(config: settings).run() }
   }
